@@ -16,7 +16,7 @@ seaborn>=0.12.0
 tqdm>=4.65.0
 
 # Activation extraction (required)
-baukit>=1.0.0
+git+https://github.com/davidbau/baukit.git
 
 # Optional: For faster operations
 # accelerate>=0.20.0
