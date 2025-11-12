@@ -933,8 +933,29 @@ def run_intervention_phase(args):
         'timestamp': datetime.now().isoformat()
     }
 
+    # Load existing results if file exists and append new results
+    if summary_file.exists():
+        try:
+            with open(summary_file, 'r') as f:
+                existing_data = json.load(f)
+
+            # If existing data is a list, append to it
+            if isinstance(existing_data, list):
+                all_results = existing_data
+            # If existing data is a single dict, convert to list
+            else:
+                all_results = [existing_data]
+
+            all_results.append(summary_data)
+            print(f"\nAppending to existing summary (now contains {len(all_results)} runs)")
+        except json.JSONDecodeError:
+            print(f"\nWarning: Could not parse existing {summary_file}, will overwrite")
+            all_results = [summary_data]
+    else:
+        all_results = [summary_data]
+
     with open(summary_file, 'w') as f:
-        json.dump(summary_data, f, indent=2)
+        json.dump(all_results, f, indent=2)
 
     print(f"\nSummary saved: {summary_file}")
 
