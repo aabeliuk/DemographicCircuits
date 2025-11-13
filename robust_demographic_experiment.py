@@ -3,23 +3,45 @@ Robust Demographic Intervention Experiment with K-Fold Validation
 
 This script runs comprehensive demographic intervention experiments with:
 1. Separate extraction and intervention phases
-2. K-fold cross-validation on political questions
-3. Flexible configuration via command-line arguments
-4. Comprehensive result tracking and reporting
+2. Memory-optimized extraction: probes globally and saves only top N components
+3. K-fold cross-validation on political questions
+4. Flexible configuration via command-line arguments
+5. Comprehensive result tracking and reporting (including probing results)
+6. Unique run identifiers to prevent overwriting results
 
 Usage:
-    # Extract circuits first (saves activations for all questions)
+    # Extract circuits first (probes globally and saves only top N components)
+    # Use --top_k_heads to control how many components to keep (default: 10)
     python robust_demographic_experiment.py --model meta-llama/Llama-3.2-1B \\
-        --probe_type attention --phase extract --demographics gender age race
+        --probe_type attention --phase extract --demographics gender age race \\
+        --run_id my_experiment_1 --top_k_heads 10
 
-    # Run k-fold validation on interventions
+    # Run k-fold validation on interventions using the same run_id
+    # Intervention phase trains weights on pre-selected components per fold
     python robust_demographic_experiment.py --model meta-llama/Llama-3.2-1B \\
         --probe_type attention --phase intervene --demographics gender age race \\
-        --intervention_strength 100.0 --top_k_heads 10 --n_folds 5
+        --intervention_strength 100.0 --n_folds 5 \\
+        --run_id my_experiment_1
 
-    # Run both phases sequentially
+    # Run both phases sequentially (run_id auto-generated if not specified)
     python robust_demographic_experiment.py --model meta-llama/Llama-3.2-1B \\
-        --probe_type attention --phase both --demographics gender age
+        --probe_type attention --phase both --demographics gender age \\
+        --top_k_heads 15
+
+    # Run intervention without specifying run_id (uses most recent extraction)
+    python robust_demographic_experiment.py --model meta-llama/Llama-3.2-1B \\
+        --probe_type attention --phase intervene --demographics gender
+
+Note: The extraction phase now includes probing to identify top N components globally
+      across all questions. Only activations for these top N are saved, dramatically
+      reducing memory usage and file sizes.
+
+Output files:
+      - Filtered activations (PKL files in extractions/)
+      - Probing results (CSV and JSON files in extractions/probing_results/)
+      - Spearman correlation visualizations (PNG files in extractions/probing_results/)
+        * For attention: Bar plot of top 50 heads + heatmap by layer/head
+        * For MLP: Bar plots of spearman correlations and accuracies by layer
 """
 
 import argparse
@@ -143,6 +165,9 @@ def parse_arguments():
                        help='Directory for output files (default: robust_experiment_results)')
     parser.add_argument('--skip_existing', action='store_true',
                        help='Skip demographics with existing extraction results')
+    parser.add_argument('--run_id', type=str, default=None,
+                       help='Run identifier for naming files. If not specified, uses timestamp. '
+                            'For intervention phase, use the run_id from extraction phase.')
 
     # Random seed
     parser.add_argument('--seed', type=int, default=42,
@@ -167,6 +192,10 @@ def parse_arguments():
     invalid_demos = set(args.demographics) - set(ALL_DEMOGRAPHICS)
     if invalid_demos:
         parser.error(f"Invalid demographics: {invalid_demos}. Valid options: {ALL_DEMOGRAPHICS}")
+
+    # Generate run_id if not specified
+    if args.run_id is None:
+        args.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     return args
 
@@ -393,9 +422,339 @@ def extract_activations_for_question(
     return all_activations, category_labels, category_names
 
 
+def probe_and_select_top_components(
+    activations,
+    labels,
+    model_config,
+    probe_type: str,
+    ridge_alpha: float,
+    top_k: int
+) -> Dict:
+    """
+    Probe activations to identify top N layers/heads and extract intervention weights.
+
+    Returns:
+        Dictionary containing:
+        - top_indices: List of (layer, head) tuples for attention or list of layers for MLP
+        - probing_results: Full probing results
+        - intervention_weights: Pre-computed intervention weights
+    """
+    print(f"\n  Running probing to identify top {top_k} components...")
+
+    if probe_type == 'attention':
+        prober = AttentionHeadProber(
+            num_layers=model_config['num_layers'],
+            num_heads=model_config['num_heads'],
+            head_dim=model_config['head_dim'],
+            alpha=ridge_alpha,
+            n_folds=2,
+            task_type='classification',
+            random_state=42
+        )
+
+        probing_results = prober.probe_all_heads(activations, labels, aggregation='mean')
+        intervention_weights = prober.get_intervention_weights(probing_results, top_k=top_k)
+
+        # Extract top head indices
+        top_heads = probing_results['head_results'][:top_k]
+        top_indices = [(head['layer'], head['head']) for head in top_heads]
+
+    elif probe_type == 'mlp':
+        probing_results = probe_mlp_layers(
+            activations, labels, model_config['num_layers'], ridge_alpha
+        )
+        intervention_weights = extract_mlp_intervention_weights(probing_results, top_k=top_k)
+
+        # Extract top layer indices
+        top_layers = probing_results['layer_results'][:top_k]
+        top_indices = [layer['layer'] for layer in top_layers]
+
+    else:
+        raise ValueError(f"Unsupported probe_type: {probe_type}")
+
+    print(f"  Selected top {len(top_indices)} components")
+
+    return {
+        'top_indices': top_indices,
+        'probing_results': probing_results,
+        'intervention_weights': intervention_weights
+    }
+
+
+def save_probing_results(
+    probing_results: Dict,
+    probe_type: str,
+    output_path: Path,
+    demographic: str
+):
+    """
+    Save probing results to CSV and JSON formats.
+
+    Args:
+        probing_results: Results from probe_and_select_top_components
+        probe_type: 'attention' or 'mlp'
+        output_path: Directory to save results
+        demographic: Name of demographic being probed
+    """
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    if probe_type == 'attention':
+        # Extract head results
+        head_results = probing_results['head_results']
+
+        # Create DataFrame
+        results_list = []
+        for head_info in head_results:
+            results_list.append({
+                'layer': head_info['layer'],
+                'head': head_info['head'],
+                'accuracy': head_info['accuracy'],
+                'spearman_r': head_info['spearman_r'],
+                'p_value': head_info['p_value']
+            })
+
+        df = pd.DataFrame(results_list)
+
+        # Save CSV
+        csv_path = output_path / f"{demographic}_attention_probing_results.csv"
+        df.to_csv(csv_path, index=False)
+        print(f"  Saved probing results to: {csv_path}")
+
+        # Save JSON with full details
+        json_path = output_path / f"{demographic}_attention_probing_results.json"
+        json_results = {
+            'demographic': demographic,
+            'probe_type': probe_type,
+            'head_results': results_list,
+            'timestamp': datetime.now().isoformat()
+        }
+        with open(json_path, 'w') as f:
+            json.dump(json_results, f, indent=2)
+
+    elif probe_type == 'mlp':
+        # Extract layer results
+        layer_results = probing_results['layer_results']
+
+        # Create DataFrame
+        results_list = []
+        for layer_info in layer_results:
+            results_list.append({
+                'layer': layer_info['layer'],
+                'accuracy': layer_info['accuracy'],
+                'spearman_r': layer_info['spearman_r'],
+                'p_value': layer_info['p_value']
+            })
+
+        df = pd.DataFrame(results_list)
+
+        # Save CSV
+        csv_path = output_path / f"{demographic}_mlp_probing_results.csv"
+        df.to_csv(csv_path, index=False)
+        print(f"  Saved probing results to: {csv_path}")
+
+        # Save JSON with full details
+        json_path = output_path / f"{demographic}_mlp_probing_results.json"
+        json_results = {
+            'demographic': demographic,
+            'probe_type': probe_type,
+            'layer_results': results_list,
+            'timestamp': datetime.now().isoformat()
+        }
+        with open(json_path, 'w') as f:
+            json.dump(json_results, f, indent=2)
+
+    return df
+
+
+def plot_spearman_correlations(
+    probing_results: Dict,
+    probe_type: str,
+    output_path: Path,
+    demographic: str,
+    top_k: int = None
+):
+    """
+    Create and save visualization of spearman correlations.
+
+    Args:
+        probing_results: Results from probe_and_select_top_components
+        probe_type: 'attention' or 'mlp'
+        output_path: Directory to save figure
+        demographic: Name of demographic being probed
+        top_k: Number of top components to highlight
+    """
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    if probe_type == 'attention':
+        head_results = probing_results['head_results']
+
+        # Extract data
+        layers = [h['layer'] for h in head_results]
+        heads = [h['head'] for h in head_results]
+        spearman_rs = [h['spearman_r'] for h in head_results]
+
+        # Create figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+        # Plot 1: Bar plot of all heads (sorted by spearman)
+        x_labels = [f"L{h['layer']}-H{h['head']}" for h in head_results[:50]]  # Top 50
+        if top_k:
+            colors = ['red' if i < top_k else 'blue' for i in range(min(50, len(spearman_rs)))]
+        else:
+            colors = ['blue'] * min(50, len(spearman_rs))
+
+        ax1.bar(range(len(x_labels)), spearman_rs[:50], color=colors, alpha=0.7)
+        ax1.set_xlabel('Layer-Head', fontsize=12)
+        ax1.set_ylabel('Spearman Correlation', fontsize=12)
+        ax1.set_title(f'Top 50 Attention Heads by Spearman Correlation\n{demographic.title()}', fontsize=14)
+        ax1.tick_params(axis='x', rotation=90, labelsize=8)
+        ax1.set_xticks(range(len(x_labels)))
+        ax1.set_xticklabels(x_labels)
+        ax1.grid(axis='y', alpha=0.3)
+        ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+
+        # Add legend
+        if top_k:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='red', alpha=0.7, label=f'Top {top_k} (used)'),
+                Patch(facecolor='blue', alpha=0.7, label='Other heads')
+            ]
+            ax1.legend(handles=legend_elements, loc='upper right')
+
+        # Plot 2: Heatmap of spearman correlations by layer and head
+        num_layers = max(layers) + 1
+        num_heads = max(heads) + 1
+
+        # Create matrix
+        spearman_matrix = np.zeros((num_layers, num_heads))
+        for h in head_results:
+            spearman_matrix[h['layer'], h['head']] = h['spearman_r']
+
+        im = ax2.imshow(spearman_matrix, aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1)
+        ax2.set_xlabel('Head', fontsize=12)
+        ax2.set_ylabel('Layer', fontsize=12)
+        ax2.set_title(f'Spearman Correlation Heatmap\n{demographic.title()}', fontsize=14)
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax2)
+        cbar.set_label('Spearman Correlation', fontsize=10)
+
+        # Mark top K heads
+        if top_k:
+            for i, h in enumerate(head_results[:top_k]):
+                ax2.plot(h['head'], h['layer'], 'g*', markersize=10, markeredgecolor='yellow', markeredgewidth=1)
+
+        plt.tight_layout()
+
+        # Save figure
+        fig_path = output_path / f"{demographic}_attention_spearman_correlations.png"
+        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"  Saved correlation plot to: {fig_path}")
+
+    elif probe_type == 'mlp':
+        layer_results = probing_results['layer_results']
+
+        # Extract data
+        layers = [l['layer'] for l in layer_results]
+        spearman_rs = [l['spearman_r'] for l in layer_results]
+        accuracies = [l['accuracy'] for l in layer_results]
+
+        # Create figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+        # Plot 1: Spearman correlation by layer
+        if top_k:
+            colors = ['red' if i < top_k else 'blue' for i in range(len(layers))]
+        else:
+            colors = ['blue'] * len(layers)
+        ax1.bar(layers, spearman_rs, color=colors, alpha=0.7)
+        ax1.set_xlabel('Layer', fontsize=12)
+        ax1.set_ylabel('Spearman Correlation', fontsize=12)
+        ax1.set_title(f'MLP Layer Spearman Correlations\n{demographic.title()}', fontsize=14)
+        ax1.grid(axis='y', alpha=0.3)
+        ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+
+        # Add legend
+        if top_k:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='red', alpha=0.7, label=f'Top {top_k} (used)'),
+                Patch(facecolor='blue', alpha=0.7, label='Other layers')
+            ]
+            ax1.legend(handles=legend_elements, loc='upper right')
+
+        # Plot 2: Accuracy by layer
+        ax2.bar(layers, accuracies, color=colors, alpha=0.7)
+        ax2.set_xlabel('Layer', fontsize=12)
+        ax2.set_ylabel('Accuracy', fontsize=12)
+        ax2.set_title(f'MLP Layer Classification Accuracy\n{demographic.title()}', fontsize=14)
+        ax2.grid(axis='y', alpha=0.3)
+
+        plt.tight_layout()
+
+        # Save figure
+        fig_path = output_path / f"{demographic}_mlp_spearman_correlations.png"
+        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"  Saved correlation plot to: {fig_path}")
+
+
+def filter_activations_by_top_components(
+    activations: torch.Tensor,
+    top_indices: List,
+    probe_type: str,
+    model_config: Dict
+) -> torch.Tensor:
+    """
+    Filter activations to keep only top N layers/heads.
+
+    For attention: activations shape [batch, num_layers, num_heads, head_dim]
+    For MLP: activations shape [batch, num_layers, hidden_dim]
+
+    Returns filtered activations with reduced dimensions.
+    """
+    if probe_type == 'attention':
+        # top_indices is list of (layer, head) tuples
+        # Extract only those specific heads
+        batch_size = activations.shape[0]
+        head_dim = activations.shape[3]
+
+        filtered_list = []
+        for layer, head in top_indices:
+            # Extract activations for this specific head: [batch, head_dim]
+            head_activations = activations[:, layer, head, :]
+            filtered_list.append(head_activations)
+
+        # Stack: [batch, top_k, head_dim]
+        filtered_activations = torch.stack(filtered_list, dim=1)
+
+    elif probe_type == 'mlp':
+        # top_indices is list of layer indices
+        # Extract only those specific layers
+        filtered_list = []
+        for layer in top_indices:
+            layer_activations = activations[:, layer, :]
+            filtered_list.append(layer_activations)
+
+        # Stack: [batch, top_k, hidden_dim]
+        filtered_activations = torch.stack(filtered_list, dim=1)
+
+    else:
+        raise ValueError(f"Unsupported probe_type: {probe_type}")
+
+    return filtered_activations
+
+
 def run_extraction_phase(args):
     """
     Phase 1: Extract activations for all questions and save to disk.
+
+    Now includes probing to identify top N layers/heads and only saves
+    activations for those components to reduce memory usage.
 
     This allows interventions to be tested with different configurations
     without re-extracting activations.
@@ -407,6 +766,7 @@ def run_extraction_phase(args):
     print(f"Probe type: {args.probe_type}")
     print(f"Demographics: {args.demographics}")
     print(f"Device: {args.device}")
+    print(f"Run ID: {args.run_id}")
     print("="*80 + "\n")
 
     # Set random seeds
@@ -434,6 +794,14 @@ def run_extraction_phase(args):
     tokenizer.pad_token = tokenizer.eos_token
     print(f"Model loaded on device: {args.device}")
 
+    # Get model config for probing
+    model_config = {
+        'num_layers': model.config.num_hidden_layers,
+        'num_heads': model.config.num_attention_heads,
+        'head_dim': model.config.hidden_size // model.config.num_attention_heads,
+        'hidden_size': model.config.hidden_size
+    }
+
     # Process each demographic
     for demographic in args.demographics:
         print(f"\n{'='*80}")
@@ -441,7 +809,7 @@ def run_extraction_phase(args):
         print(f"{'='*80}")
 
         # Check if already extracted
-        extraction_file = output_dir / f"{demographic}_{args.probe_type}_extractions.pkl"
+        extraction_file = output_dir / f"{demographic}_{args.probe_type}_{args.run_id}_extractions.pkl"
         if args.skip_existing and extraction_file.exists():
             print(f"Skipping - extraction already exists: {extraction_file}")
             continue
@@ -476,12 +844,101 @@ def run_extraction_phase(args):
                 print(f"  ERROR: {e}")
                 continue
 
-        # Save extractions
+        # Check if we have any questions extracted
+        if len(question_extractions) == 0:
+            print(f"\nNo questions extracted for {demographic}, skipping...")
+            continue
+
+        # Skip probing for 'both' mode (not supported for intervention)
+        if args.probe_type == 'both':
+            print(f"\nWARNING: probe_type='both' does not support probing/filtering. Saving full activations.")
+            probing_data = None
+            top_indices = None
+        else:
+            # Probe across all questions to identify top N components globally
+            print(f"\n{'='*60}")
+            print(f"PROBING ACROSS ALL QUESTIONS FOR {demographic.upper()}")
+            print(f"{'='*60}")
+
+            # Concatenate all activations and labels across questions
+            all_activations_list = []
+            all_labels_list = []
+            first_question = list(question_extractions.keys())[0]
+            category_names = question_extractions[first_question]['category_names']
+
+            for question, q_data in question_extractions.items():
+                all_activations_list.append(q_data['activations'])
+                all_labels_list.append(q_data['labels'])
+
+            # Concatenate
+            concatenated_activations = torch.cat(all_activations_list, dim=0)
+            concatenated_labels = np.concatenate(all_labels_list)
+
+            print(f"Concatenated activations shape: {concatenated_activations.shape}")
+            print(f"Total samples: {len(concatenated_labels)}")
+
+            # Run probing to select top N
+            probing_data = probe_and_select_top_components(
+                concatenated_activations,
+                concatenated_labels,
+                model_config,
+                args.probe_type,
+                args.ridge_alpha,
+                args.top_k_heads
+            )
+
+            top_indices = probing_data['top_indices']
+
+            # Save probing results and visualizations
+            print(f"\nSaving probing results and visualizations...")
+            results_output_dir = output_dir / 'probing_results'
+
+            # Save results to CSV/JSON
+            save_probing_results(
+                probing_data['probing_results'],
+                args.probe_type,
+                results_output_dir,
+                demographic
+            )
+
+            # Create and save visualization
+            plot_spearman_correlations(
+                probing_data['probing_results'],
+                args.probe_type,
+                results_output_dir,
+                demographic,
+                args.top_k_heads
+            )
+
+            # Clean up concatenated data to free memory
+            del concatenated_activations
+            del concatenated_labels
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+            # Filter each question's activations to keep only top N
+            print(f"\nFiltering activations to keep only top {args.top_k_heads} components...")
+            for question, q_data in question_extractions.items():
+                original_shape = q_data['activations'].shape
+                filtered_activations = filter_activations_by_top_components(
+                    q_data['activations'],
+                    top_indices,
+                    args.probe_type,
+                    model_config
+                )
+                q_data['activations'] = filtered_activations
+                print(f"  {question}: {original_shape} -> {filtered_activations.shape}")
+
+        # Save extractions (now with filtered activations)
         extraction_data = {
             'demographic': demographic,
             'probe_type': args.probe_type,
             'model': args.model,
+            'run_id': args.run_id,
             'n_samples_per_category': args.n_samples_per_category,
+            'top_k': args.top_k_heads,
+            'top_indices': top_indices,
+            'probing_results': probing_data['probing_results'] if probing_data else None,
+            'intervention_weights': probing_data['intervention_weights'] if probing_data else None,
             'question_extractions': question_extractions,
             'timestamp': datetime.now().isoformat()
         }
@@ -576,6 +1033,48 @@ def train_probes_on_fold(
 
     else:
         raise ValueError(f"Unsupported probe_type for intervention: {probe_type}")
+
+    return intervention_weights
+
+
+def train_weights_on_prefiltered_activations(
+    activations,
+    labels,
+    top_indices: List,
+    probe_type: str,
+    ridge_alpha: float
+) -> Dict:
+    """
+    Train intervention weights on already-filtered activations.
+
+    Activations are assumed to be shape [batch, top_k, dim] where top_k components
+    have already been selected in the extraction phase.
+
+    Returns intervention_weights dict mapping component index to (coef, intercept, std).
+    """
+    from sklearn.linear_model import RidgeClassifier
+
+    intervention_weights = {}
+
+    # Train a classifier for each component in the filtered activations
+    for component_idx in range(activations.shape[1]):
+        # Get activations for this component: [batch, dim]
+        component_activations = activations[:, component_idx, :].numpy()
+
+        # Train ridge classifier
+        clf = RidgeClassifier(alpha=ridge_alpha, random_state=42)
+        clf.fit(component_activations, labels)
+
+        # Extract weights
+        coef = clf.coef_
+        intercept = clf.intercept_ if hasattr(clf, 'intercept_') else np.array([0.0])
+        if not isinstance(intercept, np.ndarray):
+            intercept = np.array([intercept])
+        std = np.std(coef)
+
+        # Map back to original component index
+        original_idx = top_indices[component_idx]
+        intervention_weights[original_idx] = (coef, intercept, std)
 
     return intervention_weights
 
@@ -690,6 +1189,30 @@ def evaluate_intervention_on_fold(
     return test_results
 
 
+def find_extraction_file(extraction_dir: Path, demographic: str, probe_type: str, run_id: str = None):
+    """Find the extraction file for a demographic. If run_id not specified, find most recent."""
+    if run_id:
+        # Try specific run_id first
+        extraction_file = extraction_dir / f"{demographic}_{probe_type}_{run_id}_extractions.pkl"
+        if extraction_file.exists():
+            return extraction_file
+
+    # Find all matching extraction files
+    pattern = f"{demographic}_{probe_type}_*_extractions.pkl"
+    matching_files = list(extraction_dir.glob(pattern))
+
+    if not matching_files:
+        # Try old format without run_id for backward compatibility
+        old_format_file = extraction_dir / f"{demographic}_{probe_type}_extractions.pkl"
+        if old_format_file.exists():
+            return old_format_file
+        return None
+
+    # Return the most recent file based on modification time
+    most_recent = max(matching_files, key=lambda p: p.stat().st_mtime)
+    return most_recent
+
+
 def run_intervention_phase(args):
     """
     Phase 2: Load extractions and run k-fold validation on interventions.
@@ -708,6 +1231,7 @@ def run_intervention_phase(args):
     print(f"K-folds: {args.n_folds}")
     print(f"Top-K: {args.top_k_heads}")
     print(f"Intervention strength: {args.intervention_strength}")
+    print(f"Run ID: {args.run_id}")
     print("="*80 + "\n")
 
     # Set random seeds
@@ -752,10 +1276,12 @@ def run_intervention_phase(args):
         print(f"INTERVENING: {demographic.upper()}")
         print(f"{'='*80}")
 
-        # Load extraction
-        extraction_file = extraction_dir / f"{demographic}_{args.probe_type}_extractions.pkl"
-        if not extraction_file.exists():
-            print(f"ERROR: Extraction file not found: {extraction_file}")
+        # Find extraction file
+        extraction_file = find_extraction_file(extraction_dir, demographic, args.probe_type, args.run_id)
+        if extraction_file is None:
+            print(f"ERROR: No extraction file found for {demographic} with probe_type={args.probe_type}")
+            if args.run_id:
+                print(f"  Looked for run_id: {args.run_id}")
             print("Run extraction phase first!")
             continue
 
@@ -765,6 +1291,17 @@ def run_intervention_phase(args):
 
         question_extractions = extraction_data['question_extractions']
         questions = list(question_extractions.keys())
+
+        # Check if extraction has pre-selected top components
+        has_preselected_components = ('top_indices' in extraction_data and
+                                       extraction_data['top_indices'] is not None)
+
+        if has_preselected_components:
+            top_indices = extraction_data['top_indices']
+            print(f"Using pre-selected top {len(top_indices)} components from extraction phase")
+            print(f"  Components: {top_indices}")
+        else:
+            print(f"No pre-selected components found, will train probes per fold")
 
         print(f"Loaded {len(questions)} questions")
 
@@ -815,12 +1352,21 @@ def run_intervention_phase(args):
             print(f"\nTraining data shape: {train_activations.shape}")
             print(f"Training labels: {len(train_labels)}")
 
-            # Train probes
-            print(f"\nTraining probes on {len(train_questions)} questions...")
-            intervention_weights = train_probes_on_fold(
-                train_activations, train_labels, model_config,
-                args.probe_type, args.ridge_alpha, args.top_k_heads
-            )
+            # Train intervention weights
+            if has_preselected_components:
+                # Activations are already filtered, just train weights on pre-selected components
+                print(f"\nTraining weights on pre-selected {len(top_indices)} components...")
+                intervention_weights = train_weights_on_prefiltered_activations(
+                    train_activations, train_labels, top_indices,
+                    args.probe_type, args.ridge_alpha
+                )
+            else:
+                # Full probing: select top components and train weights
+                print(f"\nTraining probes on {len(train_questions)} questions...")
+                intervention_weights = train_probes_on_fold(
+                    train_activations, train_labels, model_config,
+                    args.probe_type, args.ridge_alpha, args.top_k_heads
+                )
 
             print(f"Extracted {len(intervention_weights)} intervention weights")
 
@@ -892,6 +1438,7 @@ def run_intervention_phase(args):
             'demographic': demographic,
             'category_names': category_names,
             'probe_type': args.probe_type,
+            'run_id': args.run_id,
             'n_folds': args.n_folds,
             'top_k_heads': args.top_k_heads,
             'intervention_strength': args.intervention_strength,
@@ -905,7 +1452,7 @@ def run_intervention_phase(args):
             'timestamp': datetime.now().isoformat()
         }
 
-        result_file = results_dir / f"{demographic}_{args.probe_type}_intervention_results.pkl"
+        result_file = results_dir / f"{demographic}_{args.probe_type}_{args.run_id}_intervention_results.pkl"
         with open(result_file, 'wb') as f:
             pickle.dump(demographic_results, f)
 
@@ -985,6 +1532,7 @@ def main():
     print(f"  Phase: {args.phase}")
     print(f"  Probe type: {args.probe_type}")
     print(f"  Demographics: {args.demographics}")
+    print(f"  Run ID: {args.run_id}")
     print(f"  K-folds: {args.n_folds}")
     print(f"  Top-K: {args.top_k_heads}")
     print(f"  Intervention strength: {args.intervention_strength}")
