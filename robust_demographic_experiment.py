@@ -3,21 +3,22 @@ Robust Demographic Intervention Experiment with K-Fold Validation
 
 This script runs comprehensive demographic intervention experiments with:
 1. Separate extraction and intervention phases
-2. Memory-optimized extraction: probes globally and saves only top N components
-3. K-fold cross-validation on political questions
+2. Memory-optimized extraction: probes per-fold and saves only top N components
+3. K-fold cross-validation with NO DATA LEAKAGE (top N selection uses train folds only)
 4. Flexible configuration via command-line arguments
-5. Comprehensive result tracking and reporting (including probing results)
+5. Comprehensive result tracking and reporting (including probing results per fold)
 6. Unique run identifiers to prevent overwriting results
 
 Usage:
-    # Extract circuits first (probes globally and saves only top N components)
+    # Extract circuits first (probes PER FOLD and saves only top N components)
     # Use --top_k_heads to control how many components to keep (default: 10)
+    # Use --n_folds to control k-fold splitting (default: 4)
     python robust_demographic_experiment.py --model meta-llama/Llama-3.2-1B \\
         --probe_type attention --phase extract --demographics gender age race \\
-        --run_id my_experiment_1 --top_k_heads 10
+        --run_id my_experiment_1 --top_k_heads 10 --n_folds 5
 
-    # Run k-fold validation on interventions using the same run_id
-    # Intervention phase trains weights on pre-selected components per fold
+    # Run k-fold validation on interventions using the same run_id and n_folds
+    # Intervention phase loads fold-specific extractions (no data leakage!)
     python robust_demographic_experiment.py --model meta-llama/Llama-3.2-1B \\
         --probe_type attention --phase intervene --demographics gender age race \\
         --intervention_strength 100.0 --n_folds 5 \\
@@ -26,20 +27,19 @@ Usage:
     # Run both phases sequentially (run_id auto-generated if not specified)
     python robust_demographic_experiment.py --model meta-llama/Llama-3.2-1B \\
         --probe_type attention --phase both --demographics gender age \\
-        --top_k_heads 15
+        --top_k_heads 15 --n_folds 4
 
-    # Run intervention without specifying run_id (uses most recent extraction)
-    python robust_demographic_experiment.py --model meta-llama/Llama-3.2-1B \\
-        --probe_type attention --phase intervene --demographics gender
+Note: The extraction phase does K-FOLD PROBING to avoid data leakage:
+      - Questions are split into K folds
+      - For each fold, top N components are selected using TRAIN questions only
+      - Each fold gets its own extraction file with fold-specific top N
+      - Intervention phase loads the matching fold files automatically
+      - This ensures component selection NEVER sees test questions!
 
-Note: The extraction phase now includes probing to identify top N components globally
-      across all questions. Only activations for these top N are saved, dramatically
-      reducing memory usage and file sizes.
-
-Output files:
-      - Filtered activations (PKL files in extractions/)
-      - Probing results (CSV and JSON files in extractions/probing_results/)
-      - Spearman correlation visualizations (PNG files in extractions/probing_results/)
+Output files (per demographic, per fold):
+      - Filtered activations: {demographic}_{probe_type}_{run_id}_fold{N}_extractions.pkl
+      - Probing results: {demographic}_fold{N}_{probe_type}_probing_results.csv/json
+      - Visualizations: {demographic}_fold{N}_{probe_type}_spearman_correlations.png
         * For attention: Bar plot of top 50 heads + heatmap by layer/head
         * For MLP: Bar plots of spearman correlations and accuracies by layer
 """
@@ -852,101 +852,153 @@ def run_extraction_phase(args):
         # Skip probing for 'both' mode (not supported for intervention)
         if args.probe_type == 'both':
             print(f"\nWARNING: probe_type='both' does not support probing/filtering. Saving full activations.")
-            probing_data = None
-            top_indices = None
+            # Save without probing (old behavior)
+            extraction_data = {
+                'demographic': demographic,
+                'probe_type': args.probe_type,
+                'model': args.model,
+                'run_id': args.run_id,
+                'n_samples_per_category': args.n_samples_per_category,
+                'question_extractions': question_extractions,
+                'timestamp': datetime.now().isoformat()
+            }
+            with open(extraction_file, 'wb') as f:
+                pickle.dump(extraction_data, f)
+            print(f"\nSaved extractions for {len(question_extractions)} questions: {extraction_file}")
         else:
-            # Probe across all questions to identify top N components globally
+            # K-FOLD PROBING: Select top N components per fold to avoid data leakage
             print(f"\n{'='*60}")
-            print(f"PROBING ACROSS ALL QUESTIONS FOR {demographic.upper()}")
+            print(f"K-FOLD PROBING FOR {demographic.upper()}")
             print(f"{'='*60}")
 
-            # Concatenate all activations and labels across questions
-            all_activations_list = []
-            all_labels_list = []
-            first_question = list(question_extractions.keys())[0]
+            questions = list(question_extractions.keys())
+            first_question = questions[0]
             category_names = question_extractions[first_question]['category_names']
 
-            for question, q_data in question_extractions.items():
-                all_activations_list.append(q_data['activations'])
-                all_labels_list.append(q_data['labels'])
+            # Setup k-fold cross-validation
+            from sklearn.model_selection import KFold
+            kfold = KFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
 
-            # Concatenate
-            concatenated_activations = torch.cat(all_activations_list, dim=0)
-            concatenated_labels = np.concatenate(all_labels_list)
+            print(f"\nSplitting {len(questions)} questions into {args.n_folds} folds")
+            print(f"Each fold will select top {args.top_k_heads} components using train questions only\n")
 
-            print(f"Concatenated activations shape: {concatenated_activations.shape}")
-            print(f"Total samples: {len(concatenated_labels)}")
+            # Process each fold
+            for fold_idx, (train_indices, test_indices) in enumerate(kfold.split(questions)):
+                print(f"\n{'-'*80}")
+                print(f"FOLD {fold_idx + 1}/{args.n_folds}")
+                print(f"{'-'*80}")
 
-            # Run probing to select top N
-            probing_data = probe_and_select_top_components(
-                concatenated_activations,
-                concatenated_labels,
-                model_config,
-                args.probe_type,
-                args.ridge_alpha,
-                args.top_k_heads
-            )
+                train_questions = [questions[i] for i in train_indices]
+                test_questions = [questions[i] for i in test_indices]
 
-            top_indices = probing_data['top_indices']
+                print(f"Train questions ({len(train_questions)}): {train_questions}")
+                print(f"Test questions ({len(test_questions)}): {test_questions}")
 
-            # Save probing results and visualizations
-            print(f"\nSaving probing results and visualizations...")
-            results_output_dir = output_dir / 'probing_results'
+                # Concatenate activations from TRAIN questions only
+                train_activations_list = []
+                train_labels_list = []
 
-            # Save results to CSV/JSON
-            save_probing_results(
-                probing_data['probing_results'],
-                args.probe_type,
-                results_output_dir,
-                demographic
-            )
+                for question in train_questions:
+                    q_data = question_extractions[question]
+                    train_activations_list.append(q_data['activations'])
+                    train_labels_list.append(q_data['labels'])
 
-            # Create and save visualization
-            plot_spearman_correlations(
-                probing_data['probing_results'],
-                args.probe_type,
-                results_output_dir,
-                demographic,
-                args.top_k_heads
-            )
+                # Concatenate
+                concatenated_activations = torch.cat(train_activations_list, dim=0)
+                concatenated_labels = np.concatenate(train_labels_list)
 
-            # Clean up concatenated data to free memory
-            del concatenated_activations
-            del concatenated_labels
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                print(f"\nTrain activations shape: {concatenated_activations.shape}")
+                print(f"Train samples: {len(concatenated_labels)}")
 
-            # Filter each question's activations to keep only top N
-            print(f"\nFiltering activations to keep only top {args.top_k_heads} components...")
-            for question, q_data in question_extractions.items():
-                original_shape = q_data['activations'].shape
-                filtered_activations = filter_activations_by_top_components(
-                    q_data['activations'],
-                    top_indices,
+                # Run probing on TRAIN questions only to select top N
+                probing_data = probe_and_select_top_components(
+                    concatenated_activations,
+                    concatenated_labels,
+                    model_config,
                     args.probe_type,
-                    model_config
+                    args.ridge_alpha,
+                    args.top_k_heads
                 )
-                q_data['activations'] = filtered_activations
-                print(f"  {question}: {original_shape} -> {filtered_activations.shape}")
 
-        # Save extractions (now with filtered activations)
-        extraction_data = {
-            'demographic': demographic,
-            'probe_type': args.probe_type,
-            'model': args.model,
-            'run_id': args.run_id,
-            'n_samples_per_category': args.n_samples_per_category,
-            'top_k': args.top_k_heads,
-            'top_indices': top_indices,
-            'probing_results': probing_data['probing_results'] if probing_data else None,
-            'intervention_weights': probing_data['intervention_weights'] if probing_data else None,
-            'question_extractions': question_extractions,
-            'timestamp': datetime.now().isoformat()
-        }
+                top_indices = probing_data['top_indices']
 
-        with open(extraction_file, 'wb') as f:
-            pickle.dump(extraction_data, f)
+                # Save probing results and visualizations for this fold
+                print(f"\nSaving fold {fold_idx + 1} probing results and visualizations...")
+                results_output_dir = output_dir / 'probing_results'
 
-        print(f"\nSaved extractions for {len(question_extractions)} questions: {extraction_file}")
+                # Save results to CSV/JSON
+                save_probing_results(
+                    probing_data['probing_results'],
+                    args.probe_type,
+                    results_output_dir,
+                    f"{demographic}_fold{fold_idx + 1}"
+                )
+
+                # Create and save visualization
+                plot_spearman_correlations(
+                    probing_data['probing_results'],
+                    args.probe_type,
+                    results_output_dir,
+                    f"{demographic}_fold{fold_idx + 1}",
+                    args.top_k_heads
+                )
+
+                # Clean up concatenated data to free memory
+                del concatenated_activations
+                del concatenated_labels
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+                # Filter ALL questions' activations to keep only this fold's top N
+                print(f"\nFiltering all questions to fold {fold_idx + 1}'s top {args.top_k_heads} components...")
+                fold_question_extractions = {}
+                for question, q_data in question_extractions.items():
+                    original_shape = q_data['activations'].shape
+                    filtered_activations = filter_activations_by_top_components(
+                        q_data['activations'],
+                        top_indices,
+                        args.probe_type,
+                        model_config
+                    )
+                    fold_question_extractions[question] = {
+                        'activations': filtered_activations,
+                        'labels': q_data['labels'],
+                        'category_names': q_data['category_names']
+                    }
+                    if question in train_questions[:3]:  # Show first 3 train
+                        print(f"  [Train] {question}: {original_shape} -> {filtered_activations.shape}")
+                    elif question in test_questions[:2]:  # Show first 2 test
+                        print(f"  [Test]  {question}: {original_shape} -> {filtered_activations.shape}")
+
+                # Save fold-specific extraction file
+                fold_extraction_file = output_dir / f"{demographic}_{args.probe_type}_{args.run_id}_fold{fold_idx + 1}_extractions.pkl"
+
+                extraction_data = {
+                    'demographic': demographic,
+                    'probe_type': args.probe_type,
+                    'model': args.model,
+                    'run_id': args.run_id,
+                    'fold_index': fold_idx,
+                    'fold_total': args.n_folds,
+                    'train_questions': train_questions,
+                    'test_questions': test_questions,
+                    'n_samples_per_category': args.n_samples_per_category,
+                    'top_k': args.top_k_heads,
+                    'top_indices': top_indices,
+                    'probing_results': probing_data['probing_results'],
+                    'intervention_weights': probing_data['intervention_weights'],
+                    'question_extractions': fold_question_extractions,
+                    'timestamp': datetime.now().isoformat()
+                }
+
+                with open(fold_extraction_file, 'wb') as f:
+                    pickle.dump(extraction_data, f)
+
+                print(f"\nSaved fold {fold_idx + 1} extractions: {fold_extraction_file}")
+
+            print(f"\n{'='*80}")
+            print(f"COMPLETED K-FOLD EXTRACTION FOR {demographic.upper()}")
+            print(f"Saved {args.n_folds} fold-specific extraction files")
+            print(f"{'='*80}")
 
     print("\n" + "="*80)
     print("EXTRACTION PHASE COMPLETE")
@@ -1276,50 +1328,88 @@ def run_intervention_phase(args):
         print(f"INTERVENING: {demographic.upper()}")
         print(f"{'='*80}")
 
-        # Find extraction file
-        extraction_file = find_extraction_file(extraction_dir, demographic, args.probe_type, args.run_id)
-        if extraction_file is None:
-            print(f"ERROR: No extraction file found for {demographic} with probe_type={args.probe_type}")
-            if args.run_id:
-                print(f"  Looked for run_id: {args.run_id}")
-            print("Run extraction phase first!")
-            continue
+        # Check if fold-specific extraction files exist
+        fold_files = []
+        for fold_idx in range(args.n_folds):
+            fold_file = extraction_dir / f"{demographic}_{args.probe_type}_{args.run_id}_fold{fold_idx + 1}_extractions.pkl"
+            if fold_file.exists():
+                fold_files.append(fold_file)
 
-        print(f"Loading extractions from: {extraction_file}")
-        with open(extraction_file, 'rb') as f:
-            extraction_data = pickle.load(f)
+        # Determine if using fold-specific or global extraction
+        using_fold_specific = len(fold_files) == args.n_folds
 
-        question_extractions = extraction_data['question_extractions']
-        questions = list(question_extractions.keys())
-
-        # Check if extraction has pre-selected top components
-        has_preselected_components = ('top_indices' in extraction_data and
-                                       extraction_data['top_indices'] is not None)
-
-        if has_preselected_components:
-            top_indices = extraction_data['top_indices']
-            print(f"Using pre-selected top {len(top_indices)} components from extraction phase")
-            print(f"  Components: {top_indices}")
+        if using_fold_specific:
+            print(f"Found {len(fold_files)} fold-specific extraction files")
+            print(f"Using fold-specific extractions (no data leakage)")
         else:
-            print(f"No pre-selected components found, will train probes per fold")
+            # Fall back to global extraction file (old behavior)
+            print(f"No fold-specific files found, looking for global extraction...")
+            extraction_file = find_extraction_file(extraction_dir, demographic, args.probe_type, args.run_id)
+            if extraction_file is None:
+                print(f"ERROR: No extraction file found for {demographic} with probe_type={args.probe_type}")
+                if args.run_id:
+                    print(f"  Looked for run_id: {args.run_id}")
+                print("Run extraction phase first!")
+                continue
 
-        print(f"Loaded {len(questions)} questions")
-
-        # Setup k-fold cross-validation
-        kfold = KFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
+            print(f"Loading global extractions from: {extraction_file}")
+            print(f"WARNING: Using global extraction may have data leakage in component selection")
+            with open(extraction_file, 'rb') as f:
+                global_extraction_data = pickle.load(f)
 
         fold_results = []
 
-        for fold_idx, (train_indices, test_indices) in enumerate(kfold.split(questions)):
-            print(f"\n{'-'*80}")
-            print(f"FOLD {fold_idx + 1}/{args.n_folds}")
-            print(f"{'-'*80}")
+        for fold_idx in range(args.n_folds):
+            if using_fold_specific:
+                # Load fold-specific extraction
+                fold_file = fold_files[fold_idx]
+                print(f"\n{'-'*80}")
+                print(f"FOLD {fold_idx + 1}/{args.n_folds}")
+                print(f"{'-'*80}")
+                print(f"Loading fold-specific extraction: {fold_file.name}")
 
-            train_questions = [questions[i] for i in train_indices]
-            test_questions = [questions[i] for i in test_indices]
+                with open(fold_file, 'rb') as f:
+                    extraction_data = pickle.load(f)
 
-            print(f"Train questions ({len(train_questions)}): {train_questions}")
-            print(f"Test questions ({len(test_questions)}): {test_questions}")
+                question_extractions = extraction_data['question_extractions']
+                train_questions = extraction_data['train_questions']
+                test_questions = extraction_data['test_questions']
+                top_indices = extraction_data['top_indices']
+
+                print(f"Train questions ({len(train_questions)}): {train_questions}")
+                print(f"Test questions ({len(test_questions)}): {test_questions}")
+                print(f"Pre-selected top {len(top_indices)} components: {top_indices}")
+
+                has_preselected_components = True
+            else:
+                # Use global extraction with k-fold splitting (old behavior)
+                print(f"\n{'-'*80}")
+                print(f"FOLD {fold_idx + 1}/{args.n_folds}")
+                print(f"{'-'*80}")
+
+                question_extractions = global_extraction_data['question_extractions']
+                questions = list(question_extractions.keys())
+
+                # Setup k-fold cross-validation
+                kfold = KFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
+                train_indices, test_indices = list(kfold.split(questions))[fold_idx]
+
+                train_questions = [questions[i] for i in train_indices]
+                test_questions = [questions[i] for i in test_indices]
+
+                print(f"Train questions ({len(train_questions)}): {train_questions}")
+                print(f"Test questions ({len(test_questions)}): {test_questions}")
+
+                # Check if extraction has pre-selected top components
+                has_preselected_components = ('top_indices' in global_extraction_data and
+                                             global_extraction_data['top_indices'] is not None)
+
+                if has_preselected_components:
+                    top_indices = global_extraction_data['top_indices']
+                    print(f"Using global pre-selected top {len(top_indices)} components")
+                else:
+                    print(f"No pre-selected components found, will train probes on this fold")
+                    top_indices = None
 
             # Aggregate training data
             train_activations = []
