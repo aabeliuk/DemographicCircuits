@@ -455,9 +455,9 @@ def probe_and_select_top_components(
         probing_results = prober.probe_all_heads(activations, labels, aggregation='mean')
         intervention_weights = prober.get_intervention_weights(probing_results, top_k=top_k)
 
-        # Extract top head indices (probing_results is a dataclass, use attribute access)
+        # Extract top head indices (both probing_results and head items are dataclasses)
         top_heads = probing_results.head_results[:top_k]
-        top_indices = [(head['layer'], head['head']) for head in top_heads]
+        top_indices = [(head.layer, head.head) for head in top_heads]
 
     elif probe_type == 'mlp':
         probing_results = probe_mlp_layers(
@@ -505,13 +505,24 @@ def save_probing_results(
         # Create DataFrame
         results_list = []
         for head_info in head_results:
-            results_list.append({
-                'layer': head_info['layer'],
-                'head': head_info['head'],
-                'accuracy': head_info['accuracy'],
-                'spearman_r': head_info['spearman_r'],
-                'p_value': head_info['p_value']
-            })
+            # head_info is a ProbingResult dataclass, use attribute access
+            if hasattr(head_info, 'layer'):
+                results_list.append({
+                    'layer': head_info.layer,
+                    'head': head_info.head,
+                    'accuracy': head_info.val_score,  # val_score is the accuracy
+                    'spearman_r': head_info.spearman_r,
+                    'p_value': head_info.spearman_p
+                })
+            else:
+                # Fallback for dict format
+                results_list.append({
+                    'layer': head_info['layer'],
+                    'head': head_info['head'],
+                    'accuracy': head_info['accuracy'],
+                    'spearman_r': head_info['spearman_r'],
+                    'p_value': head_info['p_value']
+                })
 
         df = pd.DataFrame(results_list)
 
@@ -588,16 +599,26 @@ def plot_spearman_correlations(
     if probe_type == 'attention':
         head_results = probing_results.head_results if hasattr(probing_results, 'head_results') else probing_results['head_results']
 
-        # Extract data
-        layers = [h['layer'] for h in head_results]
-        heads = [h['head'] for h in head_results]
-        spearman_rs = [h['spearman_r'] for h in head_results]
+        # Extract data (handle both ProbingResult dataclass and dict)
+        if head_results and hasattr(head_results[0], 'layer'):
+            # ProbingResult dataclass
+            layers = [h.layer for h in head_results]
+            heads = [h.head for h in head_results]
+            spearman_rs = [h.spearman_r for h in head_results]
+        else:
+            # Dict format
+            layers = [h['layer'] for h in head_results]
+            heads = [h['head'] for h in head_results]
+            spearman_rs = [h['spearman_r'] for h in head_results]
 
         # Create figure
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
         # Plot 1: Bar plot of all heads (sorted by spearman)
-        x_labels = [f"L{h['layer']}-H{h['head']}" for h in head_results[:50]]  # Top 50
+        if head_results and hasattr(head_results[0], 'layer'):
+            x_labels = [f"L{h.layer}-H{h.head}" for h in head_results[:50]]  # Top 50
+        else:
+            x_labels = [f"L{h['layer']}-H{h['head']}" for h in head_results[:50]]  # Top 50
         if top_k:
             colors = ['red' if i < top_k else 'blue' for i in range(min(50, len(spearman_rs)))]
         else:
@@ -626,10 +647,13 @@ def plot_spearman_correlations(
         num_layers = max(layers) + 1
         num_heads = max(heads) + 1
 
-        # Create matrix
+        # Create matrix (handle both ProbingResult dataclass and dict)
         spearman_matrix = np.zeros((num_layers, num_heads))
         for h in head_results:
-            spearman_matrix[h['layer'], h['head']] = h['spearman_r']
+            if hasattr(h, 'layer'):
+                spearman_matrix[h.layer, h.head] = h.spearman_r
+            else:
+                spearman_matrix[h['layer'], h['head']] = h['spearman_r']
 
         im = ax2.imshow(spearman_matrix, aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1)
         ax2.set_xlabel('Head', fontsize=12)
@@ -643,7 +667,10 @@ def plot_spearman_correlations(
         # Mark top K heads
         if top_k:
             for i, h in enumerate(head_results[:top_k]):
-                ax2.plot(h['head'], h['layer'], 'g*', markersize=10, markeredgecolor='yellow', markeredgewidth=1)
+                if hasattr(h, 'layer'):
+                    ax2.plot(h.head, h.layer, 'g*', markersize=10, markeredgecolor='yellow', markeredgewidth=1)
+                else:
+                    ax2.plot(h['head'], h['layer'], 'g*', markersize=10, markeredgecolor='yellow', markeredgewidth=1)
 
         plt.tight_layout()
 
