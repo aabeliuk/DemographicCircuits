@@ -455,8 +455,8 @@ def probe_and_select_top_components(
         probing_results = prober.probe_all_heads(activations, labels, aggregation='mean')
         intervention_weights = prober.get_intervention_weights(probing_results, top_k=top_k)
 
-        # Extract top head indices
-        top_heads = probing_results['head_results'][:top_k]
+        # Extract top head indices (probing_results is a dataclass, use attribute access)
+        top_heads = probing_results.head_results[:top_k]
         top_indices = [(head['layer'], head['head']) for head in top_heads]
 
     elif probe_type == 'mlp':
@@ -482,7 +482,7 @@ def probe_and_select_top_components(
 
 
 def save_probing_results(
-    probing_results: Dict,
+    probing_results,
     probe_type: str,
     output_path: Path,
     demographic: str
@@ -491,7 +491,7 @@ def save_probing_results(
     Save probing results to CSV and JSON formats.
 
     Args:
-        probing_results: Results from probe_and_select_top_components
+        probing_results: Results from probe_and_select_top_components (CircuitProbingResults or Dict)
         probe_type: 'attention' or 'mlp'
         output_path: Directory to save results
         demographic: Name of demographic being probed
@@ -499,8 +499,8 @@ def save_probing_results(
     output_path.mkdir(parents=True, exist_ok=True)
 
     if probe_type == 'attention':
-        # Extract head results
-        head_results = probing_results['head_results']
+        # Extract head results (from CircuitProbingResults dataclass)
+        head_results = probing_results.head_results if hasattr(probing_results, 'head_results') else probing_results['head_results']
 
         # Create DataFrame
         results_list = []
@@ -567,7 +567,7 @@ def save_probing_results(
 
 
 def plot_spearman_correlations(
-    probing_results: Dict,
+    probing_results,
     probe_type: str,
     output_path: Path,
     demographic: str,
@@ -577,7 +577,7 @@ def plot_spearman_correlations(
     Create and save visualization of spearman correlations.
 
     Args:
-        probing_results: Results from probe_and_select_top_components
+        probing_results: Results from probe_and_select_top_components (CircuitProbingResults or Dict)
         probe_type: 'attention' or 'mlp'
         output_path: Directory to save figure
         demographic: Name of demographic being probed
@@ -586,7 +586,7 @@ def plot_spearman_correlations(
     output_path.mkdir(parents=True, exist_ok=True)
 
     if probe_type == 'attention':
-        head_results = probing_results['head_results']
+        head_results = probing_results.head_results if hasattr(probing_results, 'head_results') else probing_results['head_results']
 
         # Extract data
         layers = [h['layer'] for h in head_results]
