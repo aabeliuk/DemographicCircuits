@@ -1586,12 +1586,23 @@ def run_intervention_phase(args):
                 print(f"  Intervention: {fold_intervention*100:.1f}%")
                 print(f"  Improvement:  {fold_improvement:+.1f} points")
 
+                # Store fold-level aggregates for cross-fold statistics
+                fold_aggregate_metrics = {
+                    'baseline_accuracy': fold_baseline,
+                    'intervention_accuracy': fold_intervention,
+                    'improvement': fold_improvement,
+                    'n_test_questions': len(test_results)
+                }
+            else:
+                fold_aggregate_metrics = None
+
             fold_results.append({
                 'fold': fold_idx,
                 'train_questions': train_questions,
                 'test_questions': test_questions,
                 'test_results': test_results,
-                'intervention_weights': intervention_weights
+                'intervention_weights': intervention_weights,
+                'aggregate_metrics': fold_aggregate_metrics
             })
 
         # Aggregate results across folds
@@ -1607,35 +1618,51 @@ def run_intervention_phase(args):
                     all_question_results[question] = []
                 all_question_results[question].append(result)
 
-        # Average across folds for each question
+        # Per-question results (each question tested in exactly one fold)
         question_aggregates = {}
         for question, results_list in all_question_results.items():
-            n = len(results_list)
-            baseline_vals = [r['baseline_accuracy'] for r in results_list]
-            intervention_vals = [r['intervention_accuracy'] for r in results_list]
-            improvement_vals = [r['improvement'] for r in results_list]
-
-            # Use ddof=1 for sample std (returns NaN for n=1, which is more honest than 0)
-            # Or set to None explicitly for n=1
+            # Each question appears in test set of exactly one fold
+            assert len(results_list) == 1, f"Question '{question}' appears in {len(results_list)} folds (expected 1)"
+            result = results_list[0]
             question_aggregates[question] = {
-                'baseline_accuracy_mean': np.mean(baseline_vals),
-                'baseline_accuracy_std': np.std(baseline_vals, ddof=1) if n > 1 else None,
-                'intervention_accuracy_mean': np.mean(intervention_vals),
-                'intervention_accuracy_std': np.std(intervention_vals, ddof=1) if n > 1 else None,
-                'improvement_mean': np.mean(improvement_vals),
-                'improvement_std': np.std(improvement_vals, ddof=1) if n > 1 else None,
-                'n_folds': n
+                'baseline_accuracy': result['baseline_accuracy'],
+                'intervention_accuracy': result['intervention_accuracy'],
+                'improvement': result['improvement'],
+                'n_samples': result['n_samples']
             }
 
-        # Overall metrics
-        overall_baseline = np.mean([v['baseline_accuracy_mean'] for v in question_aggregates.values()])
-        overall_intervention = np.mean([v['intervention_accuracy_mean'] for v in question_aggregates.values()])
-        overall_improvement = np.mean([v['improvement_mean'] for v in question_aggregates.values()])
+        # Aggregate ACROSS FOLDS (correct approach for computing std)
+        # Extract per-fold aggregates (mean across test questions in each fold)
+        fold_baseline_accs = []
+        fold_intervention_accs = []
+        fold_improvements = []
 
-        print(f"\nOverall Results (averaged across {args.n_folds} folds):")
-        print(f"  Baseline:     {overall_baseline*100:.1f}%")
-        print(f"  Intervention: {overall_intervention*100:.1f}%")
-        print(f"  Improvement:  {overall_improvement:+.1f} points")
+        for fold_data in fold_results:
+            if fold_data['aggregate_metrics'] is not None:
+                fold_baseline_accs.append(fold_data['aggregate_metrics']['baseline_accuracy'])
+                fold_intervention_accs.append(fold_data['aggregate_metrics']['intervention_accuracy'])
+                fold_improvements.append(fold_data['aggregate_metrics']['improvement'])
+
+        n_folds = len(fold_baseline_accs)
+        overall_baseline_mean = np.mean(fold_baseline_accs)
+        overall_baseline_std = np.std(fold_baseline_accs, ddof=1) if n_folds > 1 else None
+
+        overall_intervention_mean = np.mean(fold_intervention_accs)
+        overall_intervention_std = np.std(fold_intervention_accs, ddof=1) if n_folds > 1 else None
+
+        overall_improvement_mean = np.mean(fold_improvements)
+        overall_improvement_std = np.std(fold_improvements, ddof=1) if n_folds > 1 else None
+
+        print(f"\nOverall Results (mean ± std across {args.n_folds} folds):")
+        if overall_baseline_std is not None:
+            print(f"  Baseline:     {overall_baseline_mean*100:.1f}% ± {overall_baseline_std*100:.1f}%")
+            print(f"  Intervention: {overall_intervention_mean*100:.1f}% ± {overall_intervention_std*100:.1f}%")
+            print(f"  Improvement:  {overall_improvement_mean:+.1f} ± {overall_improvement_std:.1f} points")
+        else:
+            print(f"  Baseline:     {overall_baseline_mean*100:.1f}%")
+            print(f"  Intervention: {overall_intervention_mean*100:.1f}%")
+            print(f"  Improvement:  {overall_improvement_mean:+.1f} points")
+            print(f"  (Single fold: no std available)")
 
         # Save demographic results
         demographic_results = {
@@ -1649,9 +1676,18 @@ def run_intervention_phase(args):
             'fold_results': fold_results,
             'question_aggregates': question_aggregates,
             'overall_metrics': {
-                'baseline_accuracy': overall_baseline,
-                'intervention_accuracy': overall_intervention,
-                'improvement': overall_improvement
+                'baseline_accuracy_mean': overall_baseline_mean,
+                'baseline_accuracy_std': overall_baseline_std,
+                'intervention_accuracy_mean': overall_intervention_mean,
+                'intervention_accuracy_std': overall_intervention_std,
+                'improvement_mean': overall_improvement_mean,
+                'improvement_std': overall_improvement_std,
+                'per_fold_aggregates': {
+                    'baseline': fold_baseline_accs,
+                    'intervention': fold_intervention_accs,
+                    'improvement': fold_improvements
+                },
+                'n_folds': n_folds
             },
             'timestamp': datetime.now().isoformat()
         }
@@ -1674,9 +1710,12 @@ def run_intervention_phase(args):
         'config': vars(args),
         'demographics': {
             demo: {
-                'baseline_accuracy': results['overall_metrics']['baseline_accuracy'],
-                'intervention_accuracy': results['overall_metrics']['intervention_accuracy'],
-                'improvement': results['overall_metrics']['improvement'],
+                'baseline_accuracy_mean': results['overall_metrics']['baseline_accuracy_mean'],
+                'baseline_accuracy_std': results['overall_metrics']['baseline_accuracy_std'],
+                'intervention_accuracy_mean': results['overall_metrics']['intervention_accuracy_mean'],
+                'intervention_accuracy_std': results['overall_metrics']['intervention_accuracy_std'],
+                'improvement_mean': results['overall_metrics']['improvement_mean'],
+                'improvement_std': results['overall_metrics']['improvement_std'],
                 'n_folds': results['n_folds']
             }
             for demo, results in all_demographic_results.items()
