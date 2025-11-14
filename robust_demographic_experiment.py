@@ -1610,14 +1610,21 @@ def run_intervention_phase(args):
         # Average across folds for each question
         question_aggregates = {}
         for question, results_list in all_question_results.items():
+            n = len(results_list)
+            baseline_vals = [r['baseline_accuracy'] for r in results_list]
+            intervention_vals = [r['intervention_accuracy'] for r in results_list]
+            improvement_vals = [r['improvement'] for r in results_list]
+
+            # Use ddof=1 for sample std (returns NaN for n=1, which is more honest than 0)
+            # Or set to None explicitly for n=1
             question_aggregates[question] = {
-                'baseline_accuracy_mean': np.mean([r['baseline_accuracy'] for r in results_list]),
-                'baseline_accuracy_std': np.std([r['baseline_accuracy'] for r in results_list]),
-                'intervention_accuracy_mean': np.mean([r['intervention_accuracy'] for r in results_list]),
-                'intervention_accuracy_std': np.std([r['intervention_accuracy'] for r in results_list]),
-                'improvement_mean': np.mean([r['improvement'] for r in results_list]),
-                'improvement_std': np.std([r['improvement'] for r in results_list]),
-                'n_folds': len(results_list)
+                'baseline_accuracy_mean': np.mean(baseline_vals),
+                'baseline_accuracy_std': np.std(baseline_vals, ddof=1) if n > 1 else None,
+                'intervention_accuracy_mean': np.mean(intervention_vals),
+                'intervention_accuracy_std': np.std(intervention_vals, ddof=1) if n > 1 else None,
+                'improvement_mean': np.mean(improvement_vals),
+                'improvement_std': np.std(improvement_vals, ddof=1) if n > 1 else None,
+                'n_folds': n
             }
 
         # Overall metrics
