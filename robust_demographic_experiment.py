@@ -1286,19 +1286,26 @@ def evaluate_intervention_on_fold(
             if len(category_users) == 0:
                 continue
 
-            print(f"      Category '{category}': {len(category_users)} users (using class direction {category_idx})")
-
             # Create class-specific intervention weights for this category
             category_weights = select_class_specific_weights(intervention_weights, category_idx)
 
             # Create intervention engine with class-specific weights
             engine = EngineClass(model, category_weights, device)
 
-            # Config for this category (always maximize toward the category's direction)
+            # Determine intervention direction based on binary vs multiclass
+            if len(category_names) == 2:
+                # Binary classification: use opposite directions for the two classes
+                # Category 0: maximize, Category 1: minimize (opposite sides of decision boundary)
+                intervention_direction = 'maximize' if category_idx == 0 else 'minimize'
+            else:
+                # Multiclass: always maximize toward the class-specific direction
+                intervention_direction = 'maximize'
+
+            # Config for this category
             config_kwargs = {
                 'intervention_strength': intervention_strength,
                 config_param: len(category_weights),
-                'intervention_direction': 'maximize'  # Always maximize toward target class
+                'intervention_direction': intervention_direction
             }
             config = ConfigClass(**config_kwargs)
 
