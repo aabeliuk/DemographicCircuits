@@ -1073,8 +1073,24 @@ def extract_mlp_intervention_weights(results, top_k=10):
     for result in layer_results:
         layer = result['layer']
         coef = result['coefficients']
-        std = np.std(coef) if coef is not None else 0.0
+
+        # For multiclass: coef is [n_classes, n_features]
+        # For binary: coef is [n_features] or [1, n_features]
+        # Ensure binary case is 1D
+        if coef is not None and coef.ndim > 1 and coef.shape[0] == 1:
+            coef = coef[0]
+
+        # Compute std (for multiclass, compute per-class then average)
+        if coef is not None:
+            if coef.ndim > 1:
+                std = np.mean([np.std(coef[i]) for i in range(coef.shape[0])])
+            else:
+                std = np.std(coef)
+        else:
+            std = 0.0
+
         intercept = 0.0
+        # Store full coefficient matrix (1D for binary, 2D for multiclass)
         intervention_weights[layer] = (coef, intercept, std)
 
     return intervention_weights
@@ -1146,13 +1162,25 @@ def train_weights_on_prefiltered_activations(
 
         # Extract weights
         coef = clf.coef_
+        # For multiclass: coef is [n_classes, n_features]
+        # For binary: coef is [n_features] or [1, n_features]
+        # Ensure binary case is 1D
+        if coef.ndim > 1 and coef.shape[0] == 1:
+            coef = coef[0]
+
         intercept = clf.intercept_ if hasattr(clf, 'intercept_') else np.array([0.0])
         if not isinstance(intercept, np.ndarray):
             intercept = np.array([intercept])
-        std = np.std(coef)
+
+        # Compute std (for multiclass, compute per-class then average)
+        if coef.ndim > 1:
+            std = np.mean([np.std(coef[i]) for i in range(coef.shape[0])])
+        else:
+            std = np.std(coef)
 
         # Map back to original component index
         original_idx = top_indices[component_idx]
+        # Store full coefficient matrix (1D for binary, 2D for multiclass)
         intervention_weights[original_idx] = (coef, intercept, std)
 
     return intervention_weights
@@ -1173,6 +1201,31 @@ def predict_from_logits(logits: torch.Tensor, answer_options: List, tokenizer) -
     return answer_options[predicted_idx]
 
 
+def select_class_specific_weights(
+    intervention_weights: Dict,
+    category_idx: int
+) -> Dict:
+    """
+    Extract class-specific coefficients for multiclass intervention.
+
+    For binary classification, returns weights unchanged.
+    For multiclass, selects the coefficient row for the target category.
+    """
+    class_specific_weights = {}
+
+    for key, (coef, intercept, std) in intervention_weights.items():
+        if coef.ndim > 1:
+            # Multiclass: select the row for this category
+            class_coef = coef[category_idx]
+        else:
+            # Binary: use as-is
+            class_coef = coef
+
+        class_specific_weights[key] = (class_coef, intercept, std)
+
+    return class_specific_weights
+
+
 def evaluate_intervention_on_fold(
     model,
     tokenizer,
@@ -1188,15 +1241,15 @@ def evaluate_intervention_on_fold(
 ) -> Dict:
     """Evaluate intervention on test fold"""
 
-    # Setup intervention engine
+    # Determine config class and parameter name
     if probe_type == 'attention':
-        engine = CircuitInterventionEngine(model, intervention_weights, device)
         ConfigClass = InterventionConfig
         config_param = 'top_k_heads'
+        EngineClass = CircuitInterventionEngine
     else:  # mlp
-        engine = MLPInterventionEngine(model, intervention_weights, device)
         ConfigClass = MLPInterventionConfig
         config_param = 'top_k_layers'
+        EngineClass = MLPInterventionEngine
 
     test_results = {}
 
@@ -1216,42 +1269,62 @@ def evaluate_intervention_on_fold(
         if len(answer_options) == 0:
             continue
 
+        # Print sample size for this question
+        q_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
+        print(f"    Testing {question}: {len(test_users)} samples, {len(answer_options)} answer options")
+        print(f"      {q_label}")
+
         baseline_predictions = []
         intervention_predictions = []
         true_labels = []
 
-        for idx, user_profile in test_users.iterrows():
-            prompt = create_prompt(user_profile, question, answer_options=answer_options, answer=None)
+        # Group users by category for efficient batch processing
+        for category_idx, category in enumerate(category_names):
+            # Filter users in this category
+            category_users = test_users[test_users[demographic_attr] == category]
 
-            # Baseline prediction
-            with torch.no_grad():
-                inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                outputs = model(**inputs)
-                baseline_logits = outputs.logits[:, -1, :].cpu()
+            if len(category_users) == 0:
+                continue
 
-            baseline_pred = predict_from_logits(baseline_logits, answer_options, tokenizer)
-            baseline_predictions.append(baseline_pred)
+            print(f"      Category '{category}': {len(category_users)} users (using class direction {category_idx})")
 
-            # Intervention prediction
-            user_category = user_profile[demographic_attr]
-            intervention_direction = 'maximize' if user_category == category_names[0] else 'minimize'
+            # Create class-specific intervention weights for this category
+            category_weights = select_class_specific_weights(intervention_weights, category_idx)
 
+            # Create intervention engine with class-specific weights
+            engine = EngineClass(model, category_weights, device)
+
+            # Config for this category (always maximize toward the category's direction)
             config_kwargs = {
                 'intervention_strength': intervention_strength,
-                config_param: len(intervention_weights),
-                'intervention_direction': intervention_direction
+                config_param: len(category_weights),
+                'intervention_direction': 'maximize'  # Always maximize toward target class
             }
             config = ConfigClass(**config_kwargs)
 
-            intervention_logits = engine.intervene_activation_steering_logits(
-                prompt, tokenizer, config
-            )
+            # Process all users in this category
+            for idx, user_profile in category_users.iterrows():
+                prompt = create_prompt(user_profile, question, answer_options=answer_options, answer=None)
 
-            intervention_pred = predict_from_logits(intervention_logits.cpu(), answer_options, tokenizer)
-            intervention_predictions.append(intervention_pred)
+                # Baseline prediction
+                with torch.no_grad():
+                    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+                    inputs = {k: v.to(device) for k, v in inputs.items()}
+                    outputs = model(**inputs)
+                    baseline_logits = outputs.logits[:, -1, :].cpu()
 
-            true_labels.append(user_profile[question])
+                baseline_pred = predict_from_logits(baseline_logits, answer_options, tokenizer)
+                baseline_predictions.append(baseline_pred)
+
+                # Intervention prediction with class-specific direction
+                intervention_logits = engine.intervene_activation_steering_logits(
+                    prompt, tokenizer, config
+                )
+
+                intervention_pred = predict_from_logits(intervention_logits.cpu(), answer_options, tokenizer)
+                intervention_predictions.append(intervention_pred)
+
+                true_labels.append(user_profile[question])
 
         # Calculate accuracies
         baseline_acc = accuracy_score(true_labels, baseline_predictions)
