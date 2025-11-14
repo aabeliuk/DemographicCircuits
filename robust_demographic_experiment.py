@@ -1137,13 +1137,18 @@ def train_weights_on_prefiltered_activations(
     labels,
     top_indices: List,
     probe_type: str,
-    ridge_alpha: float
+    ridge_alpha: float,
+    top_k: int = None
 ) -> Dict:
     """
     Train intervention weights on already-filtered activations.
 
-    Activations are assumed to be shape [batch, top_k, dim] where top_k components
-    have already been selected in the extraction phase.
+    Activations are assumed to be shape [batch, num_saved_components, dim] where
+    components have already been selected in the extraction phase.
+
+    Args:
+        top_k: Number of top components to use (default: use all saved components).
+               Allows testing with fewer components than were saved during extraction.
 
     Returns intervention_weights dict mapping component index to (coef, intercept, std).
     """
@@ -1151,8 +1156,17 @@ def train_weights_on_prefiltered_activations(
 
     intervention_weights = {}
 
-    # Train a classifier for each component in the filtered activations
-    for component_idx in range(activations.shape[1]):
+    # Determine how many components to use
+    num_saved_components = activations.shape[1]
+    if top_k is None:
+        top_k = num_saved_components
+    else:
+        top_k = min(top_k, num_saved_components)
+
+    print(f"  Using top {top_k} of {num_saved_components} saved components")
+
+    # Train a classifier for each of the top_k components
+    for component_idx in range(top_k):
         # Get activations for this component: [batch, dim]
         component_activations = activations[:, component_idx, :].numpy()
 
@@ -1487,6 +1501,12 @@ def run_intervention_phase(args):
                 print(f"Test questions ({len(test_questions)}): {test_questions}")
                 print(f"Pre-selected top {len(top_indices)} components: {top_indices}")
 
+                # Validate that requested top_k_heads doesn't exceed saved components
+                if args.top_k_heads > len(top_indices):
+                    print(f"  WARNING: Requested top_k_heads={args.top_k_heads} but only {len(top_indices)} components were saved.")
+                    print(f"  Will use all {len(top_indices)} saved components instead.")
+                    print(f"  To use more components, re-run extraction phase with larger --top_k_heads")
+
                 has_preselected_components = True
             else:
                 # Use global extraction with k-fold splitting (old behavior)
@@ -1514,6 +1534,12 @@ def run_intervention_phase(args):
                 if has_preselected_components:
                     top_indices = global_extraction_data['top_indices']
                     print(f"Using global pre-selected top {len(top_indices)} components")
+
+                    # Validate that requested top_k_heads doesn't exceed saved components
+                    if args.top_k_heads > len(top_indices):
+                        print(f"  WARNING: Requested top_k_heads={args.top_k_heads} but only {len(top_indices)} components were saved.")
+                        print(f"  Will use all {len(top_indices)} saved components instead.")
+                        print(f"  To use more components, re-run extraction phase with larger --top_k_heads")
                 else:
                     print(f"No pre-selected components found, will train probes on this fold")
                     top_indices = None
@@ -1552,10 +1578,10 @@ def run_intervention_phase(args):
             # Train intervention weights
             if has_preselected_components:
                 # Activations are already filtered, just train weights on pre-selected components
-                print(f"\nTraining weights on pre-selected {len(top_indices)} components...")
+                print(f"\nTraining weights on pre-selected {len(top_indices)} components (will use top {args.top_k_heads})...")
                 intervention_weights = train_weights_on_prefiltered_activations(
                     train_activations, train_labels, top_indices,
-                    args.probe_type, args.ridge_alpha
+                    args.probe_type, args.ridge_alpha, top_k=args.top_k_heads
                 )
             else:
                 # Full probing: select top components and train weights
