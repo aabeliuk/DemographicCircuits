@@ -175,6 +175,13 @@ def parse_arguments():
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed (default: 42)')
 
+    # Prompt style
+    parser.add_argument('--prompt_style', type=str,
+                       choices=['original', 'explicit_instruction', 'first_person', 'chain_of_thought', 'diversity_explicit'],
+                       default='original',
+                       help='Prompt style to use for baseline predictions (default: original). '
+                            'Different styles can reduce model bias and improve prediction diversity.')
+
     args = parser.parse_args()
 
     # Auto-detect device if not specified
@@ -320,12 +327,194 @@ def create_prompt(
     user_profile: pd.Series,
     question: str,
     answer_options: Optional[List[str]] = None,
-    answer: Optional[str] = None
+    answer: Optional[str] = None,
+    prompt_style: str = "original"
 ) -> str:
     """Build a demographic prompt WITH all attributes"""
-    return create_prompt_without_attribute(
-        user_profile, question, None, answer_options, answer
-    )
+    if prompt_style == "original":
+        return create_prompt_without_attribute(
+            user_profile, question, None, answer_options, answer
+        )
+    else:
+        return create_prompt_v2(
+            user_profile, question, None, answer_options, answer, prompt_style
+        )
+
+
+def create_prompt_v2(
+    user_profile: pd.Series,
+    question: str,
+    exclude_attribute: str,
+    answer_options: Optional[List[str]] = None,
+    answer: Optional[str] = None,
+    prompt_style: str = "explicit_instruction"
+) -> str:
+    """Build improved demographic prompts with various styles to reduce bias"""
+
+    # Build demographic description (same as original)
+    adjectives = []
+    gender = None
+    education_phrase = None
+    location_phrase = None
+
+    # Mappings
+    age_map = {'Young Adult': 'young', 'Adult': 'middle-aged', 'Senior': 'senior'}
+    marital_map = {'Married': 'married', 'Previously married': 'previously married', 'Never married': 'never married'}
+    religion_map = {'Religious': 'religious', 'Not Religious': 'non-religious'}
+    income_map = {'Low': 'low-income', 'Middle': 'middle-income', 'High': 'high-income'}
+    ideology_map = {'Left': 'politically liberal', 'Center': 'politically moderate', 'Right': 'politically conservative'}
+    edu_map = {'Low': 'with a high school education', 'Medium': 'with some college', 'High': 'with a college degree'}
+
+    # Build demographics, excluding the target attribute
+    if exclude_attribute != 'age' and 'age' in user_profile and not pd.isna(user_profile['age']):
+        adjectives.append(age_map.get(user_profile['age'], str(user_profile['age'])))
+
+    if exclude_attribute != 'race' and 'race' in user_profile and not pd.isna(user_profile['race']):
+        adjectives.append(str(user_profile['race']))
+
+    if exclude_attribute != 'marital_status' and 'marital_status' in user_profile and not pd.isna(user_profile['marital_status']):
+        adjectives.append(marital_map.get(user_profile['marital_status'], ''))
+
+    if exclude_attribute != 'religion' and 'religion' in user_profile and not pd.isna(user_profile['religion']):
+        adjectives.append(religion_map.get(user_profile['religion'], ''))
+
+    if exclude_attribute != 'income' and 'income' in user_profile and not pd.isna(user_profile['income']):
+        adjectives.append(income_map.get(user_profile['income'], ''))
+
+    if exclude_attribute != 'ideology' and 'ideology' in user_profile and not pd.isna(user_profile['ideology']):
+        adjectives.append(ideology_map.get(user_profile['ideology'], ''))
+
+    if exclude_attribute != 'gender' and 'gender' in user_profile and not pd.isna(user_profile['gender']):
+        gender = str(user_profile['gender']).lower()
+
+    if exclude_attribute != 'education' and 'education' in user_profile and not pd.isna(user_profile['education']):
+        education_phrase = edu_map.get(user_profile['education'], '')
+
+    if exclude_attribute != 'urban_rural' and 'urban_rural' in user_profile and not pd.isna(user_profile['urban_rural']):
+        location_phrase = f"from a {str(user_profile['urban_rural']).lower()} area"
+
+    # Build final demographic string
+    demographic_parts = []
+
+    if adjectives:
+        adjectives_str = ', '.join([a for a in adjectives if a])
+        if gender:
+            demographic_parts.append(f"{adjectives_str} {gender}")
+        else:
+            demographic_parts.append(f"{adjectives_str} person")
+    elif gender:
+        demographic_parts.append(gender)
+    else:
+        demographic_parts.append("person")
+
+    if education_phrase:
+        demographic_parts.append(education_phrase)
+
+    if location_phrase:
+        demographic_parts.append(location_phrase)
+
+    demographic = ' '.join(demographic_parts)
+
+    # Get question label
+    question_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
+
+    # Build options string
+    options_str = ' / '.join(answer_options) if answer_options else ""
+
+    # Build prompt based on style
+    if prompt_style == "explicit_instruction":
+        if answer is not None:
+            prompt = f"""Based on the following demographic profile, predict how this person would most likely answer:
+
+Profile: A {demographic}
+Question: {question_label}
+Options: {options_str}
+
+Consider how their demographic characteristics (age, race, income, ideology, location, etc.) typically influence opinions on this topic.
+
+Answer: {answer}"""
+        else:
+            prompt = f"""Based on the following demographic profile, predict how this person would most likely answer:
+
+Profile: A {demographic}
+Question: {question_label}
+Options: {options_str}
+
+Consider how their demographic characteristics (age, race, income, ideology, location, etc.) typically influence opinions on this topic.
+
+Answer:"""
+
+    elif prompt_style == "first_person":
+        if answer is not None:
+            prompt = f"""I am a {demographic}. I am asked: {question_label}
+
+My answer ({options_str}): {answer}"""
+        else:
+            prompt = f"""I am a {demographic}. I am asked: {question_label}
+
+My answer ({options_str}):"""
+
+    elif prompt_style == "chain_of_thought":
+        # Extract specific attributes for reasoning
+        ideology = user_profile.get('ideology', 'unknown')
+        income = user_profile.get('income', 'unknown')
+        location = user_profile.get('urban_rural', 'unknown')
+
+        if answer is not None:
+            prompt = f"""Profile: A {demographic}
+Question: {question_label} ({options_str})
+
+Consider:
+- How might their {ideology} ideology influence their view?
+- How might their {income} income and {location} location affect this?
+- What position would be most consistent with their background?
+
+Most likely answer: {answer}"""
+        else:
+            prompt = f"""Profile: A {demographic}
+Question: {question_label} ({options_str})
+
+Consider:
+- How might their {ideology} ideology influence their view?
+- How might their {income} income and {location} location affect this?
+- What position would be most consistent with their background?
+
+Most likely answer:"""
+
+    elif prompt_style == "diversity_explicit":
+        if answer is not None:
+            prompt = f"""People have diverse opinions based on their backgrounds.
+Profile: A {demographic}
+Question: {question_label}
+Options: {options_str}
+
+What would THIS SPECIFIC person most likely answer, given their unique demographic profile?
+
+Answer: {answer}"""
+        else:
+            prompt = f"""People have diverse opinions based on their backgrounds.
+Profile: A {demographic}
+Question: {question_label}
+Options: {options_str}
+
+What would THIS SPECIFIC person most likely answer, given their unique demographic profile?
+
+Answer:"""
+
+    else:
+        # Fallback to original style
+        if answer is not None:
+            if answer_options:
+                prompt = f"A {demographic} is asked: {question_label} ({options_str}). They answer: {answer}"
+            else:
+                prompt = f"A {demographic} is asked: {question_label}. They answer: {answer}"
+        else:
+            if answer_options:
+                prompt = f"A {demographic} is asked: {question_label} ({options_str}). They answer:"
+            else:
+                prompt = f"A {demographic} is asked: {question_label}. They answer:"
+
+    return prompt
 
 
 # ============================================================================
@@ -1253,7 +1442,8 @@ def evaluate_intervention_on_fold(
     device: str,
     probe_type: str,
     intervention_strength: float,
-    eval_sample_size: int
+    eval_sample_size: int,
+    prompt_style: str = "original"
 ) -> Dict:
     """Evaluate intervention on test fold"""
 
@@ -1327,7 +1517,7 @@ def evaluate_intervention_on_fold(
 
             # Process all users in this category
             for idx, user_profile in category_users.iterrows():
-                prompt = create_prompt(user_profile, question, answer_options=answer_options, answer=None)
+                prompt = create_prompt(user_profile, question, answer_options=answer_options, answer=None, prompt_style=prompt_style)
 
                 # Baseline prediction
                 with torch.no_grad():
@@ -1645,7 +1835,8 @@ def run_intervention_phase(args):
             test_results = evaluate_intervention_on_fold(
                 model, tokenizer, df, test_questions, demographic,
                 category_names, intervention_weights, args.device,
-                args.probe_type, args.intervention_strength, args.eval_sample_size
+                args.probe_type, args.intervention_strength, args.eval_sample_size,
+                args.prompt_style
             )
 
             # Print fold results
@@ -1746,10 +1937,12 @@ def run_intervention_phase(args):
                 fold_intervention_accs.append(fold_data['aggregate_metrics']['intervention_accuracy'])
                 fold_improvements.append(fold_data['aggregate_metrics']['improvement'])
 
-                # Add Kendall metrics if available
+                # Add Kendall metrics if available (check each independently)
                 if fold_data['aggregate_metrics']['baseline_kendall_tau'] is not None:
                     fold_baseline_kendalls.append(fold_data['aggregate_metrics']['baseline_kendall_tau'])
+                if fold_data['aggregate_metrics']['intervention_kendall_tau'] is not None:
                     fold_intervention_kendalls.append(fold_data['aggregate_metrics']['intervention_kendall_tau'])
+                if fold_data['aggregate_metrics']['kendall_improvement'] is not None:
                     fold_kendall_improvements.append(fold_data['aggregate_metrics']['kendall_improvement'])
 
         n_folds = len(fold_baseline_accs)
