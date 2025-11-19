@@ -303,77 +303,37 @@ def build_demographic_description(user_profile: pd.Series, exclude_attribute: st
     return ' '.join(demographic_parts)
 
 
-def create_prompt_without_attribute(
-    user_profile: pd.Series,
-    question: str,
-    exclude_attribute: str,
-    answer_options: Optional[List[str]] = None,
-    answer: Optional[str] = None,
-    prompt_style: str = "original"
-) -> str:
-    """Build a demographic prompt WITHOUT a specified attribute"""
-    # If using advanced prompt style, use create_prompt_v2
-    if prompt_style != "original":
-        return create_prompt_v2(user_profile, question, exclude_attribute,
-                               answer_options, answer, prompt_style)
-
-    # Build demographic description (respects exclude_attribute)
-    demographic = build_demographic_description(user_profile, exclude_attribute)
-
-    # Get question label
-    question_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
-
-    # Build prompt
-    if answer is not None:
-        if answer_options:
-            options_str = ' / '.join(answer_options)
-            prompt = f"A {demographic} is asked: {question_label} ({options_str}). They answer: {answer}"
-        else:
-            prompt = f"A {demographic} is asked: {question_label}. They answer: {answer}"
-    else:
-        if answer_options:
-            options_str = ' / '.join(answer_options)
-            prompt = f"A {demographic} is asked: {question_label} ({options_str}). They answer:"
-        else:
-            prompt = f"A {demographic} is asked: {question_label}. They answer:"
-
-    return prompt
-
-
 def create_prompt(
     user_profile: pd.Series,
     question: str,
+    exclude_attribute: str = None,
     answer_options: Optional[List[str]] = None,
     answer: Optional[str] = None,
     prompt_style: str = "original"
 ) -> str:
-    """Build a demographic prompt WITH all attributes"""
-    if prompt_style == "original":
-        return create_prompt_without_attribute(
-            user_profile, question, None, answer_options, answer
-        )
-    else:
-        return create_prompt_v2(
-            user_profile, question, None, answer_options, answer, prompt_style
-        )
-
-
-def create_prompt_v2(
-    user_profile: pd.Series,
-    question: str,
-    exclude_attribute: str,
-    answer_options: Optional[List[str]] = None,
-    answer: Optional[str] = None,
-    prompt_style: str = "explicit_instruction"
-) -> str:
     """
-    Build improved demographic prompts with various styles to reduce bias.
+    Build a demographic prompt with configurable style.
 
-    IMPORTANT: Respects exclude_attribute for extraction phase.
-    All prompt styles use build_demographic_description() which properly excludes
-    the target demographic attribute during probing.
+    Args:
+        user_profile: User demographic data
+        question: Question ID or text
+        exclude_attribute: Attribute to exclude from description (e.g., 'ideology' during extraction).
+                          None means include all attributes (default for intervention phase).
+        answer_options: List of possible answers
+        answer: The actual answer (for training prompts)
+        prompt_style: One of ['original', 'explicit_instruction', 'first_person',
+                              'chain_of_thought', 'diversity_explicit']
+
+    Returns:
+        Formatted prompt string
+
+    Examples:
+        # Extraction phase - exclude target demographic
+        prompt = create_prompt(profile, "ideology_question", exclude_attribute="ideology")
+
+        # Intervention phase - include all demographics
+        prompt = create_prompt(profile, "political_question", prompt_style="explicit_instruction")
     """
-
     # Build demographic description (respects exclude_attribute)
     demographic = build_demographic_description(user_profile, exclude_attribute)
 
@@ -384,9 +344,22 @@ def create_prompt_v2(
     options_str = ' / '.join(answer_options) if answer_options else ""
 
     # Build prompt based on style
-    if prompt_style == "explicit_instruction":
+    if prompt_style == "original":
+        # Original simple format
         if answer is not None:
-            prompt = f"""Based on the following demographic profile, predict how this person would most likely answer:
+            if answer_options:
+                return f"A {demographic} is asked: {question_label} ({options_str}). They answer: {answer}"
+            else:
+                return f"A {demographic} is asked: {question_label}. They answer: {answer}"
+        else:
+            if answer_options:
+                return f"A {demographic} is asked: {question_label} ({options_str}). They answer:"
+            else:
+                return f"A {demographic} is asked: {question_label}. They answer:"
+
+    elif prompt_style == "explicit_instruction":
+        if answer is not None:
+            return f"""Based on the following demographic profile, predict how this person would most likely answer:
 
 Profile: A {demographic}
 Question: {question_label}
@@ -396,7 +369,7 @@ Consider how their demographic characteristics (age, race, income, ideology, loc
 
 Answer: {answer}"""
         else:
-            prompt = f"""Based on the following demographic profile, predict how this person would most likely answer:
+            return f"""Based on the following demographic profile, predict how this person would most likely answer:
 
 Profile: A {demographic}
 Question: {question_label}
@@ -408,11 +381,11 @@ Answer:"""
 
     elif prompt_style == "first_person":
         if answer is not None:
-            prompt = f"""I am a {demographic}. I am asked: {question_label}
+            return f"""I am a {demographic}. I am asked: {question_label}
 
 My answer ({options_str}): {answer}"""
         else:
-            prompt = f"""I am a {demographic}. I am asked: {question_label}
+            return f"""I am a {demographic}. I am asked: {question_label}
 
 My answer ({options_str}):"""
 
@@ -423,7 +396,7 @@ My answer ({options_str}):"""
         location = user_profile.get('urban_rural', 'unknown')
 
         if answer is not None:
-            prompt = f"""Profile: A {demographic}
+            return f"""Profile: A {demographic}
 Question: {question_label} ({options_str})
 
 Consider:
@@ -433,7 +406,7 @@ Consider:
 
 Most likely answer: {answer}"""
         else:
-            prompt = f"""Profile: A {demographic}
+            return f"""Profile: A {demographic}
 Question: {question_label} ({options_str})
 
 Consider:
@@ -445,7 +418,7 @@ Most likely answer:"""
 
     elif prompt_style == "diversity_explicit":
         if answer is not None:
-            prompt = f"""People have diverse opinions based on their backgrounds.
+            return f"""People have diverse opinions based on their backgrounds.
 Profile: A {demographic}
 Question: {question_label}
 Options: {options_str}
@@ -454,7 +427,7 @@ What would THIS SPECIFIC person most likely answer, given their unique demograph
 
 Answer: {answer}"""
         else:
-            prompt = f"""People have diverse opinions based on their backgrounds.
+            return f"""People have diverse opinions based on their backgrounds.
 Profile: A {demographic}
 Question: {question_label}
 Options: {options_str}
@@ -464,19 +437,9 @@ What would THIS SPECIFIC person most likely answer, given their unique demograph
 Answer:"""
 
     else:
-        # Fallback to original style
-        if answer is not None:
-            if answer_options:
-                prompt = f"A {demographic} is asked: {question_label} ({options_str}). They answer: {answer}"
-            else:
-                prompt = f"A {demographic} is asked: {question_label}. They answer: {answer}"
-        else:
-            if answer_options:
-                prompt = f"A {demographic} is asked: {question_label} ({options_str}). They answer:"
-            else:
-                prompt = f"A {demographic} is asked: {question_label}. They answer:"
-
-    return prompt
+        raise ValueError(f"Unknown prompt_style: {prompt_style}. Must be one of: "
+                        f"'original', 'explicit_instruction', 'first_person', "
+                        f"'chain_of_thought', 'diversity_explicit'")
 
 
 # ============================================================================
@@ -540,8 +503,12 @@ def extract_activations_for_question(
     for category_idx, (category, sampled_df) in enumerate(zip(category_names, category_samples)):
         for idx, user_profile in sampled_df.iterrows():
             answer = user_profile[question]
-            prompt = create_prompt_without_attribute(
-                user_profile, question, demographic_attr, answer_options, answer, prompt_style
+            prompt = create_prompt(
+                user_profile, question,
+                exclude_attribute=demographic_attr,  # Exclude target demographic
+                answer_options=answer_options,
+                answer=answer,
+                prompt_style=prompt_style
             )
             all_prompts.append(prompt)
             all_category_labels.append(category_idx)
@@ -1625,7 +1592,13 @@ def evaluate_intervention_on_fold(
 
             # Process all users in this category
             for idx, user_profile in category_users.iterrows():
-                prompt = create_prompt(user_profile, question, answer_options=answer_options, answer=None, prompt_style=prompt_style)
+                prompt = create_prompt(
+                    user_profile, question,
+                    exclude_attribute=None,  # Include all demographics for prediction
+                    answer_options=answer_options,
+                    answer=None,
+                    prompt_style=prompt_style
+                )
 
                 # Baseline prediction
                 with torch.no_grad():
