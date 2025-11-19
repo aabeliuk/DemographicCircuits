@@ -58,6 +58,7 @@ import pickle
 import json
 from datetime import datetime
 from pathlib import Path
+from collections import Counter
 from sklearn.model_selection import KFold
 from sklearn.metrics import accuracy_score
 from scipy.stats import kendalltau
@@ -1348,6 +1349,22 @@ def evaluate_intervention_on_fold(
 
                 true_labels.append(user_profile[question])
 
+        # Print response distributions
+        print(f"\n      Response Distributions:")
+        true_dist = Counter(true_labels)
+        baseline_dist = Counter(baseline_predictions)
+        intervention_dist = Counter(intervention_predictions)
+
+        print(f"        True labels:        {dict(true_dist)}")
+        print(f"        Baseline preds:     {dict(baseline_dist)}")
+        print(f"        Intervention preds: {dict(intervention_dist)}")
+
+        # Check for prediction collapse
+        if len(baseline_dist) == 1:
+            print(f"Baseline predictions collapsed to single value!")
+        if len(intervention_dist) == 1:
+            print(f"Intervention predictions collapsed to single value!")
+
         # Calculate accuracies
         baseline_acc = accuracy_score(true_labels, baseline_predictions)
         intervention_acc = accuracy_score(true_labels, intervention_predictions)
@@ -1358,7 +1375,19 @@ def evaluate_intervention_on_fold(
         try:
             baseline_kendall, baseline_kendall_p = kendalltau(true_labels, baseline_predictions)
             intervention_kendall, intervention_kendall_p = kendalltau(true_labels, intervention_predictions)
-            kendall_improvement = intervention_kendall - baseline_kendall
+
+            # Handle NaN values (occurs when all predictions are identical)
+            if np.isnan(baseline_kendall):
+                baseline_kendall = baseline_kendall_p = None
+            if np.isnan(intervention_kendall):
+                intervention_kendall = intervention_kendall_p = None
+
+            # Calculate improvement only if both are valid
+            if baseline_kendall is not None and intervention_kendall is not None:
+                kendall_improvement = intervention_kendall - baseline_kendall
+            else:
+                kendall_improvement = None
+
         except (ValueError, TypeError):
             # Handle non-numeric or non-comparable data
             baseline_kendall = baseline_kendall_p = None
@@ -1625,10 +1654,13 @@ def run_intervention_phase(args):
                 fold_intervention = np.mean([r['intervention_accuracy'] for r in test_results.values()])
                 fold_improvement = np.mean([r['improvement'] for r in test_results.values()])
 
-                # Calculate Kendall's tau averages (filter out None values)
-                baseline_kendalls = [r['baseline_kendall_tau'] for r in test_results.values() if r['baseline_kendall_tau'] is not None]
-                intervention_kendalls = [r['intervention_kendall_tau'] for r in test_results.values() if r['intervention_kendall_tau'] is not None]
-                kendall_improvements = [r['kendall_improvement'] for r in test_results.values() if r['kendall_improvement'] is not None]
+                # Calculate Kendall's tau averages (filter out None and NaN values)
+                baseline_kendalls = [r['baseline_kendall_tau'] for r in test_results.values()
+                                    if r['baseline_kendall_tau'] is not None and not (isinstance(r['baseline_kendall_tau'], float) and np.isnan(r['baseline_kendall_tau']))]
+                intervention_kendalls = [r['intervention_kendall_tau'] for r in test_results.values()
+                                        if r['intervention_kendall_tau'] is not None and not (isinstance(r['intervention_kendall_tau'], float) and np.isnan(r['intervention_kendall_tau']))]
+                kendall_improvements = [r['kendall_improvement'] for r in test_results.values()
+                                       if r['kendall_improvement'] is not None and not (isinstance(r['kendall_improvement'], float) and np.isnan(r['kendall_improvement']))]
 
                 fold_baseline_kendall = np.mean(baseline_kendalls) if baseline_kendalls else None
                 fold_intervention_kendall = np.mean(intervention_kendalls) if intervention_kendalls else None
@@ -1638,10 +1670,13 @@ def run_intervention_phase(args):
                 print(f"  Baseline:     {fold_baseline*100:.1f}%")
                 print(f"  Intervention: {fold_intervention*100:.1f}%")
                 print(f"  Improvement:  {fold_improvement:+.1f} points")
-                if fold_baseline_kendall is not None:
-                    print(f"  Kendall's tau (Baseline):     {fold_baseline_kendall:.3f}")
-                    print(f"  Kendall's tau (Intervention): {fold_intervention_kendall:.3f}")
-                    print(f"  Kendall's tau Improvement:    {fold_kendall_improvement:+.3f}")
+                if fold_baseline_kendall is not None or fold_intervention_kendall is not None:
+                    baseline_str = f"{fold_baseline_kendall:.3f}" if fold_baseline_kendall is not None else "N/A"
+                    intervention_str = f"{fold_intervention_kendall:.3f}" if fold_intervention_kendall is not None else "N/A"
+                    improvement_str = f"{fold_kendall_improvement:+.3f}" if fold_kendall_improvement is not None else "N/A"
+                    print(f"  Kendall's tau (Baseline):     {baseline_str}")
+                    print(f"  Kendall's tau (Intervention): {intervention_str}")
+                    print(f"  Kendall's tau Improvement:    {improvement_str}")
 
                 # Store fold-level aggregates for cross-fold statistics
                 fold_aggregate_metrics = {
@@ -1749,9 +1784,12 @@ def run_intervention_phase(args):
             print(f"  Intervention: {overall_intervention_mean*100:.1f}% ± {overall_intervention_std*100:.1f}%")
             print(f"  Improvement:  {overall_improvement_mean:+.1f} ± {overall_improvement_std:.1f} points")
             if overall_baseline_kendall_mean is not None:
-                print(f"  Kendall's tau (Baseline):     {overall_baseline_kendall_mean:.3f} ± {overall_baseline_kendall_std:.3f}")
-                print(f"  Kendall's tau (Intervention): {overall_intervention_kendall_mean:.3f} ± {overall_intervention_kendall_std:.3f}")
-                print(f"  Kendall's tau Improvement:    {overall_kendall_improvement_mean:+.3f} ± {overall_kendall_improvement_std:.3f}")
+                kendall_std_str = f" ± {overall_baseline_kendall_std:.3f}" if overall_baseline_kendall_std is not None else ""
+                print(f"  Kendall's tau (Baseline):     {overall_baseline_kendall_mean:.3f}{kendall_std_str}")
+                kendall_std_str = f" ± {overall_intervention_kendall_std:.3f}" if overall_intervention_kendall_std is not None else ""
+                print(f"  Kendall's tau (Intervention): {overall_intervention_kendall_mean:.3f}{kendall_std_str}")
+                kendall_std_str = f" ± {overall_kendall_improvement_std:.3f}" if overall_kendall_improvement_std is not None else ""
+                print(f"  Kendall's tau Improvement:    {overall_kendall_improvement_mean:+.3f}{kendall_std_str}")
         else:
             print(f"  Baseline:     {overall_baseline_mean*100:.1f}%")
             print(f"  Intervention: {overall_intervention_mean*100:.1f}%")
