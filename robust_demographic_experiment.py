@@ -237,9 +237,14 @@ def create_prompt_without_attribute(
     question: str,
     exclude_attribute: str,
     answer_options: Optional[List[str]] = None,
-    answer: Optional[str] = None
+    answer: Optional[str] = None,
+    prompt_style: str = "original"
 ) -> str:
     """Build a demographic prompt WITHOUT a specified attribute"""
+    # If using advanced prompt style, use create_prompt_v2
+    if prompt_style != "original":
+        return create_prompt_v2(user_profile, question, exclude_attribute,
+                               answer_options, answer, prompt_style)
     adjectives = []
     gender = None
     education_phrase = None
@@ -529,7 +534,8 @@ def extract_activations_for_question(
     demographic_attr: str,
     n_samples_per_category: int,
     device: str,
-    probe_type: str
+    probe_type: str,
+    prompt_style: str = "original"
 ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], List[str]]:
     """Extract activations for a single question"""
 
@@ -578,7 +584,7 @@ def extract_activations_for_question(
         for idx, user_profile in sampled_df.iterrows():
             answer = user_profile[question]
             prompt = create_prompt_without_attribute(
-                user_profile, question, demographic_attr, answer_options, answer
+                user_profile, question, demographic_attr, answer_options, answer, prompt_style
             )
             all_prompts.append(prompt)
             all_category_labels.append(category_idx)
@@ -1043,7 +1049,8 @@ def run_extraction_phase(args):
             try:
                 activations, labels, category_names = extract_activations_for_question(
                     model, tokenizer, df, question, demographic,
-                    args.n_samples_per_category, args.device, args.probe_type
+                    args.n_samples_per_category, args.device, args.probe_type,
+                    args.prompt_style
                 )
 
                 if activations is None:
