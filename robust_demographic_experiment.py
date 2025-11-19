@@ -232,19 +232,13 @@ def load_anes_data(path: str) -> pd.DataFrame:
 # PROMPT GENERATION
 # ============================================================================
 
-def create_prompt_without_attribute(
-    user_profile: pd.Series,
-    question: str,
-    exclude_attribute: str,
-    answer_options: Optional[List[str]] = None,
-    answer: Optional[str] = None,
-    prompt_style: str = "original"
-) -> str:
-    """Build a demographic prompt WITHOUT a specified attribute"""
-    # If using advanced prompt style, use create_prompt_v2
-    if prompt_style != "original":
-        return create_prompt_v2(user_profile, question, exclude_attribute,
-                               answer_options, answer, prompt_style)
+def build_demographic_description(user_profile: pd.Series, exclude_attribute: str = None) -> str:
+    """
+    Build demographic description string, optionally excluding a specific attribute.
+
+    This is used in both extraction (exclude target demographic) and intervention (include all).
+    All prompt styles use this function to ensure consistent attribute exclusion.
+    """
     adjectives = []
     gender = None
     education_phrase = None
@@ -258,7 +252,7 @@ def create_prompt_without_attribute(
     ideology_map = {'Left': 'politically liberal', 'Center': 'politically moderate', 'Right': 'politically conservative'}
     edu_map = {'Low': 'with a high school education', 'Medium': 'with some college', 'High': 'with a college degree'}
 
-    # Build demographics, excluding the target attribute
+    # Build demographics, excluding the target attribute if specified
     if exclude_attribute != 'age' and 'age' in user_profile and not pd.isna(user_profile['age']):
         adjectives.append(age_map.get(user_profile['age'], str(user_profile['age'])))
 
@@ -306,7 +300,25 @@ def create_prompt_without_attribute(
     if location_phrase:
         demographic_parts.append(location_phrase)
 
-    demographic = ' '.join(demographic_parts)
+    return ' '.join(demographic_parts)
+
+
+def create_prompt_without_attribute(
+    user_profile: pd.Series,
+    question: str,
+    exclude_attribute: str,
+    answer_options: Optional[List[str]] = None,
+    answer: Optional[str] = None,
+    prompt_style: str = "original"
+) -> str:
+    """Build a demographic prompt WITHOUT a specified attribute"""
+    # If using advanced prompt style, use create_prompt_v2
+    if prompt_style != "original":
+        return create_prompt_v2(user_profile, question, exclude_attribute,
+                               answer_options, answer, prompt_style)
+
+    # Build demographic description (respects exclude_attribute)
+    demographic = build_demographic_description(user_profile, exclude_attribute)
 
     # Get question label
     question_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
@@ -354,71 +366,16 @@ def create_prompt_v2(
     answer: Optional[str] = None,
     prompt_style: str = "explicit_instruction"
 ) -> str:
-    """Build improved demographic prompts with various styles to reduce bias"""
+    """
+    Build improved demographic prompts with various styles to reduce bias.
 
-    # Build demographic description (same as original)
-    adjectives = []
-    gender = None
-    education_phrase = None
-    location_phrase = None
+    IMPORTANT: Respects exclude_attribute for extraction phase.
+    All prompt styles use build_demographic_description() which properly excludes
+    the target demographic attribute during probing.
+    """
 
-    # Mappings
-    age_map = {'Young Adult': 'young', 'Adult': 'middle-aged', 'Senior': 'senior'}
-    marital_map = {'Married': 'married', 'Previously married': 'previously married', 'Never married': 'never married'}
-    religion_map = {'Religious': 'religious', 'Not Religious': 'non-religious'}
-    income_map = {'Low': 'low-income', 'Middle': 'middle-income', 'High': 'high-income'}
-    ideology_map = {'Left': 'politically liberal', 'Center': 'politically moderate', 'Right': 'politically conservative'}
-    edu_map = {'Low': 'with a high school education', 'Medium': 'with some college', 'High': 'with a college degree'}
-
-    # Build demographics, excluding the target attribute
-    if exclude_attribute != 'age' and 'age' in user_profile and not pd.isna(user_profile['age']):
-        adjectives.append(age_map.get(user_profile['age'], str(user_profile['age'])))
-
-    if exclude_attribute != 'race' and 'race' in user_profile and not pd.isna(user_profile['race']):
-        adjectives.append(str(user_profile['race']))
-
-    if exclude_attribute != 'marital_status' and 'marital_status' in user_profile and not pd.isna(user_profile['marital_status']):
-        adjectives.append(marital_map.get(user_profile['marital_status'], ''))
-
-    if exclude_attribute != 'religion' and 'religion' in user_profile and not pd.isna(user_profile['religion']):
-        adjectives.append(religion_map.get(user_profile['religion'], ''))
-
-    if exclude_attribute != 'income' and 'income' in user_profile and not pd.isna(user_profile['income']):
-        adjectives.append(income_map.get(user_profile['income'], ''))
-
-    if exclude_attribute != 'ideology' and 'ideology' in user_profile and not pd.isna(user_profile['ideology']):
-        adjectives.append(ideology_map.get(user_profile['ideology'], ''))
-
-    if exclude_attribute != 'gender' and 'gender' in user_profile and not pd.isna(user_profile['gender']):
-        gender = str(user_profile['gender']).lower()
-
-    if exclude_attribute != 'education' and 'education' in user_profile and not pd.isna(user_profile['education']):
-        education_phrase = edu_map.get(user_profile['education'], '')
-
-    if exclude_attribute != 'urban_rural' and 'urban_rural' in user_profile and not pd.isna(user_profile['urban_rural']):
-        location_phrase = f"from a {str(user_profile['urban_rural']).lower()} area"
-
-    # Build final demographic string
-    demographic_parts = []
-
-    if adjectives:
-        adjectives_str = ', '.join([a for a in adjectives if a])
-        if gender:
-            demographic_parts.append(f"{adjectives_str} {gender}")
-        else:
-            demographic_parts.append(f"{adjectives_str} person")
-    elif gender:
-        demographic_parts.append(gender)
-    else:
-        demographic_parts.append("person")
-
-    if education_phrase:
-        demographic_parts.append(education_phrase)
-
-    if location_phrase:
-        demographic_parts.append(location_phrase)
-
-    demographic = ' '.join(demographic_parts)
+    # Build demographic description (respects exclude_attribute)
+    demographic = build_demographic_description(user_profile, exclude_attribute)
 
     # Get question label
     question_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
