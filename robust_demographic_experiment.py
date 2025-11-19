@@ -1431,6 +1431,150 @@ def select_class_specific_weights(
     return class_specific_weights
 
 
+# ============================================================================
+# ADVANCED METRICS FOR DISTRIBUTION QUALITY
+# ============================================================================
+
+def get_distribution(labels: List) -> Dict:
+    """Get probability distribution from list of labels"""
+    counts = Counter(labels)
+    total = len(labels)
+    return {k: v/total for k, v in counts.items()}
+
+
+def prediction_entropy(predictions: List) -> float:
+    """
+    Shannon entropy of predictions. Measures diversity.
+
+    Returns:
+        0 = all predictions identical (complete collapse)
+        log2(K) = uniform distribution (maximum diversity)
+    """
+    counts = Counter(predictions)
+    total = len(predictions)
+    probs = [c/total for c in counts.values()]
+    from scipy.stats import entropy
+    return entropy(probs, base=2)
+
+
+def gini_diversity(predictions: List) -> float:
+    """
+    Gini diversity index. Measures prediction diversity.
+
+    Returns:
+        0 = all predictions identical
+        ~1 = highly diverse predictions
+    """
+    counts = Counter(predictions)
+    total = len(predictions)
+    probs = [c/total for c in counts.values()]
+    return 1 - sum(p**2 for p in probs)
+
+
+def js_divergence(true_labels: List, predictions: List) -> float:
+    """
+    Jensen-Shannon divergence between true and predicted distributions.
+
+    Returns:
+        0 = distributions identical (perfect match)
+        1 = completely different distributions
+    """
+    from scipy.spatial.distance import jensenshannon
+
+    # Get all possible categories
+    all_categories = sorted(set(true_labels) | set(predictions))
+
+    # Build probability vectors
+    true_dist = get_distribution(true_labels)
+    pred_dist = get_distribution(predictions)
+
+    true_vec = [true_dist.get(cat, 0) for cat in all_categories]
+    pred_vec = [pred_dist.get(cat, 0) for cat in all_categories]
+
+    return jensenshannon(true_vec, pred_vec, base=2)
+
+
+def total_variation_distance(true_labels: List, predictions: List) -> float:
+    """
+    Total variation distance between distributions.
+
+    Returns:
+        0 = distributions identical
+        1 = completely disjoint distributions
+    """
+    true_dist = get_distribution(true_labels)
+    pred_dist = get_distribution(predictions)
+
+    all_categories = set(true_dist.keys()) | set(pred_dist.keys())
+
+    return 0.5 * sum(abs(true_dist.get(cat, 0) - pred_dist.get(cat, 0))
+                     for cat in all_categories)
+
+
+def distribution_quality_score(true_labels: List, predictions: List) -> float:
+    """
+    Combined metric measuring both diversity and distributional similarity.
+
+    Returns:
+        Score between 0-1 where higher is better
+        - Rewards prediction diversity
+        - Rewards similarity to true distribution
+    """
+    # Component 1: Normalized diversity (0-1)
+    ent = prediction_entropy(predictions)
+    n_categories = len(set(true_labels))
+    max_entropy = np.log2(n_categories) if n_categories > 1 else 1.0
+    normalized_diversity = ent / max_entropy if max_entropy > 0 else 0
+
+    # Component 2: Distributional similarity (0-1)
+    jsd = js_divergence(true_labels, predictions)
+    similarity = 1 - jsd  # Invert so higher is better
+
+    # Combine with equal weights
+    return 0.5 * normalized_diversity + 0.5 * similarity
+
+
+def compute_advanced_metrics(true_labels: List, predictions: List) -> Dict:
+    """
+    Compute all advanced metrics for evaluating prediction quality.
+
+    Returns dict with:
+        - Diversity metrics (entropy, gini)
+        - Distributional similarity (js_divergence, total_variation)
+        - Multiclass performance (macro_f1, balanced_accuracy, cohen_kappa)
+        - Combined quality score
+    """
+    from sklearn.metrics import f1_score, balanced_accuracy_score, cohen_kappa_score
+
+    metrics = {}
+
+    try:
+        # Diversity metrics
+        metrics['entropy'] = prediction_entropy(predictions)
+        metrics['gini_diversity'] = gini_diversity(predictions)
+
+        # Distributional similarity
+        metrics['js_divergence'] = js_divergence(true_labels, predictions)
+        metrics['total_variation'] = total_variation_distance(true_labels, predictions)
+
+        # Multiclass performance
+        metrics['macro_f1'] = f1_score(true_labels, predictions, average='macro', zero_division=0)
+        metrics['balanced_accuracy'] = balanced_accuracy_score(true_labels, predictions)
+        metrics['cohen_kappa'] = cohen_kappa_score(true_labels, predictions)
+
+        # Combined quality score
+        metrics['dist_quality_score'] = distribution_quality_score(true_labels, predictions)
+
+    except Exception as e:
+        # If any metric fails, set all to None
+        print(f"      Warning: Could not compute advanced metrics: {e}")
+        metrics = {k: None for k in ['entropy', 'gini_diversity', 'js_divergence',
+                                      'total_variation', 'macro_f1', 'balanced_accuracy',
+                                      'cohen_kappa', 'dist_quality_score']}
+
+    return metrics
+
+
 def evaluate_intervention_on_fold(
     model,
     tokenizer,
@@ -1584,6 +1728,23 @@ def evaluate_intervention_on_fold(
             intervention_kendall = intervention_kendall_p = None
             kendall_improvement = None
 
+        # Calculate advanced metrics (diversity and distributional quality)
+        baseline_advanced = compute_advanced_metrics(true_labels, baseline_predictions)
+        intervention_advanced = compute_advanced_metrics(true_labels, intervention_predictions)
+
+        # Calculate improvements for key metrics
+        improvements = {}
+        for key in baseline_advanced.keys():
+            if baseline_advanced[key] is not None and intervention_advanced[key] is not None:
+                # For divergence metrics (lower is better), improvement is negative delta
+                if key in ['js_divergence', 'total_variation']:
+                    improvements[f'{key}_improvement'] = baseline_advanced[key] - intervention_advanced[key]
+                else:
+                    # For other metrics (higher is better), improvement is positive delta
+                    improvements[f'{key}_improvement'] = intervention_advanced[key] - baseline_advanced[key]
+            else:
+                improvements[f'{key}_improvement'] = None
+
         test_results[question] = {
             'baseline_accuracy': baseline_acc,
             'intervention_accuracy': intervention_acc,
@@ -1593,6 +1754,26 @@ def evaluate_intervention_on_fold(
             'intervention_kendall_tau': intervention_kendall,
             'intervention_kendall_p': intervention_kendall_p,
             'kendall_improvement': kendall_improvement,
+            # Advanced baseline metrics
+            'baseline_entropy': baseline_advanced['entropy'],
+            'baseline_gini_diversity': baseline_advanced['gini_diversity'],
+            'baseline_js_divergence': baseline_advanced['js_divergence'],
+            'baseline_total_variation': baseline_advanced['total_variation'],
+            'baseline_macro_f1': baseline_advanced['macro_f1'],
+            'baseline_balanced_accuracy': baseline_advanced['balanced_accuracy'],
+            'baseline_cohen_kappa': baseline_advanced['cohen_kappa'],
+            'baseline_dist_quality_score': baseline_advanced['dist_quality_score'],
+            # Advanced intervention metrics
+            'intervention_entropy': intervention_advanced['entropy'],
+            'intervention_gini_diversity': intervention_advanced['gini_diversity'],
+            'intervention_js_divergence': intervention_advanced['js_divergence'],
+            'intervention_total_variation': intervention_advanced['total_variation'],
+            'intervention_macro_f1': intervention_advanced['macro_f1'],
+            'intervention_balanced_accuracy': intervention_advanced['balanced_accuracy'],
+            'intervention_cohen_kappa': intervention_advanced['cohen_kappa'],
+            'intervention_dist_quality_score': intervention_advanced['dist_quality_score'],
+            # Improvements
+            **improvements,
             'n_samples': len(test_users)
         }
 
@@ -1857,10 +2038,35 @@ def run_intervention_phase(args):
                 fold_intervention_kendall = np.mean(intervention_kendalls) if intervention_kendalls else None
                 fold_kendall_improvement = np.mean(kendall_improvements) if kendall_improvements else None
 
+                # Calculate advanced metrics averages
+                def safe_mean(metric_name):
+                    """Calculate mean for a metric, filtering out None values"""
+                    values = [r[metric_name] for r in test_results.values()
+                             if r.get(metric_name) is not None and not (isinstance(r.get(metric_name), float) and np.isnan(r.get(metric_name)))]
+                    return np.mean(values) if values else None
+
+                # Key advanced metrics
+                fold_baseline_entropy = safe_mean('baseline_entropy')
+                fold_intervention_entropy = safe_mean('intervention_entropy')
+                fold_baseline_js_div = safe_mean('baseline_js_divergence')
+                fold_intervention_js_div = safe_mean('intervention_js_divergence')
+                fold_baseline_macro_f1 = safe_mean('baseline_macro_f1')
+                fold_intervention_macro_f1 = safe_mean('intervention_macro_f1')
+                fold_baseline_dist_quality = safe_mean('baseline_dist_quality_score')
+                fold_intervention_dist_quality = safe_mean('intervention_dist_quality_score')
+
+                # Improvements
+                fold_entropy_improvement = safe_mean('entropy_improvement')
+                fold_js_div_improvement = safe_mean('js_divergence_improvement')
+                fold_macro_f1_improvement = safe_mean('macro_f1_improvement')
+                fold_dist_quality_improvement = safe_mean('dist_quality_score_improvement')
+
                 print(f"\nFold {fold_idx + 1} Results:")
                 print(f"  Baseline:     {fold_baseline*100:.1f}%")
                 print(f"  Intervention: {fold_intervention*100:.1f}%")
                 print(f"  Improvement:  {fold_improvement:+.1f} points")
+
+                # Print Kendall's tau
                 if fold_baseline_kendall is not None or fold_intervention_kendall is not None:
                     baseline_str = f"{fold_baseline_kendall:.3f}" if fold_baseline_kendall is not None else "N/A"
                     intervention_str = f"{fold_intervention_kendall:.3f}" if fold_intervention_kendall is not None else "N/A"
@@ -1868,6 +2074,17 @@ def run_intervention_phase(args):
                     print(f"  Kendall's tau (Baseline):     {baseline_str}")
                     print(f"  Kendall's tau (Intervention): {intervention_str}")
                     print(f"  Kendall's tau Improvement:    {improvement_str}")
+
+                # Print key advanced metrics
+                print(f"\n  Advanced Metrics:")
+                if fold_baseline_entropy is not None:
+                    print(f"    Entropy (Baseline → Intervention):     {fold_baseline_entropy:.3f} → {fold_intervention_entropy:.3f} ({fold_entropy_improvement:+.3f})")
+                if fold_baseline_js_div is not None:
+                    print(f"    JS Divergence (Baseline → Intervention): {fold_baseline_js_div:.3f} → {fold_intervention_js_div:.3f} ({fold_js_div_improvement:+.3f})")
+                if fold_baseline_macro_f1 is not None:
+                    print(f"    Macro F1 (Baseline → Intervention):    {fold_baseline_macro_f1:.3f} → {fold_intervention_macro_f1:.3f} ({fold_macro_f1_improvement:+.3f})")
+                if fold_baseline_dist_quality is not None:
+                    print(f"    Dist Quality (Baseline → Intervention): {fold_baseline_dist_quality:.3f} → {fold_intervention_dist_quality:.3f} ({fold_dist_quality_improvement:+.3f})")
 
                 # Store fold-level aggregates for cross-fold statistics
                 fold_aggregate_metrics = {
@@ -1877,6 +2094,19 @@ def run_intervention_phase(args):
                     'baseline_kendall_tau': fold_baseline_kendall,
                     'intervention_kendall_tau': fold_intervention_kendall,
                     'kendall_improvement': fold_kendall_improvement,
+                    # Advanced metrics
+                    'baseline_entropy': fold_baseline_entropy,
+                    'intervention_entropy': fold_intervention_entropy,
+                    'entropy_improvement': fold_entropy_improvement,
+                    'baseline_js_divergence': fold_baseline_js_div,
+                    'intervention_js_divergence': fold_intervention_js_div,
+                    'js_divergence_improvement': fold_js_div_improvement,
+                    'baseline_macro_f1': fold_baseline_macro_f1,
+                    'intervention_macro_f1': fold_intervention_macro_f1,
+                    'macro_f1_improvement': fold_macro_f1_improvement,
+                    'baseline_dist_quality_score': fold_baseline_dist_quality,
+                    'intervention_dist_quality_score': fold_intervention_dist_quality,
+                    'dist_quality_score_improvement': fold_dist_quality_improvement,
                     'n_test_questions': len(test_results)
                 }
             else:
