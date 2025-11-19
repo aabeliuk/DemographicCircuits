@@ -1955,20 +1955,23 @@ def run_intervention_phase(args):
         overall_improvement_mean = np.mean(fold_improvements)
         overall_improvement_std = np.std(fold_improvements, ddof=1) if n_folds > 1 else None
 
-        # Kendall's tau statistics
-        n_kendall_folds = len(fold_baseline_kendalls)
-        if n_kendall_folds > 0:
+        # Kendall's tau statistics (calculate each independently as lists may have different lengths)
+        if len(fold_baseline_kendalls) > 0:
             overall_baseline_kendall_mean = np.mean(fold_baseline_kendalls)
-            overall_baseline_kendall_std = np.std(fold_baseline_kendalls, ddof=1) if n_kendall_folds > 1 else None
-
-            overall_intervention_kendall_mean = np.mean(fold_intervention_kendalls)
-            overall_intervention_kendall_std = np.std(fold_intervention_kendalls, ddof=1) if n_kendall_folds > 1 else None
-
-            overall_kendall_improvement_mean = np.mean(fold_kendall_improvements)
-            overall_kendall_improvement_std = np.std(fold_kendall_improvements, ddof=1) if n_kendall_folds > 1 else None
+            overall_baseline_kendall_std = np.std(fold_baseline_kendalls, ddof=1) if len(fold_baseline_kendalls) > 1 else None
         else:
             overall_baseline_kendall_mean = overall_baseline_kendall_std = None
+
+        if len(fold_intervention_kendalls) > 0:
+            overall_intervention_kendall_mean = np.mean(fold_intervention_kendalls)
+            overall_intervention_kendall_std = np.std(fold_intervention_kendalls, ddof=1) if len(fold_intervention_kendalls) > 1 else None
+        else:
             overall_intervention_kendall_mean = overall_intervention_kendall_std = None
+
+        if len(fold_kendall_improvements) > 0:
+            overall_kendall_improvement_mean = np.mean(fold_kendall_improvements)
+            overall_kendall_improvement_std = np.std(fold_kendall_improvements, ddof=1) if len(fold_kendall_improvements) > 1 else None
+        else:
             overall_kendall_improvement_mean = overall_kendall_improvement_std = None
 
         print(f"\nOverall Results (mean ± std across {args.n_folds} folds):")
@@ -2026,7 +2029,9 @@ def run_intervention_phase(args):
                     'kendall_improvement': fold_kendall_improvements
                 },
                 'n_folds': n_folds,
-                'n_kendall_folds': n_kendall_folds
+                'n_baseline_kendall_folds': len(fold_baseline_kendalls),
+                'n_intervention_kendall_folds': len(fold_intervention_kendalls),
+                'n_kendall_improvement_folds': len(fold_kendall_improvements)
             },
             'timestamp': datetime.now().isoformat()
         }
@@ -2062,7 +2067,9 @@ def run_intervention_phase(args):
                 'kendall_improvement_mean': results['overall_metrics']['kendall_improvement_mean'],
                 'kendall_improvement_std': results['overall_metrics']['kendall_improvement_std'],
                 'n_folds': results['n_folds'],
-                'n_kendall_folds': results['overall_metrics']['n_kendall_folds']
+                'n_baseline_kendall_folds': results['overall_metrics']['n_baseline_kendall_folds'],
+                'n_intervention_kendall_folds': results['overall_metrics']['n_intervention_kendall_folds'],
+                'n_kendall_improvement_folds': results['overall_metrics']['n_kendall_improvement_folds']
             }
             for demo, results in all_demographic_results.items()
         },
