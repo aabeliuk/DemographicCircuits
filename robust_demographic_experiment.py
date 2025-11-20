@@ -1533,7 +1533,8 @@ def combine_demographic_weights(
     demographic_weights_dict: Dict[str, Dict],
     user_profile: pd.Series,
     demographic_attrs: List[str],
-    demographic_categories: Dict[str, List[str]]
+    demographic_categories: Dict[str, List[str]],
+    verbose: bool = False
 ) -> Dict:
     """
     Combine intervention weights from multiple demographics for intersectional intervention.
@@ -1600,13 +1601,14 @@ def combine_demographic_weights(
                 combined_weights[component_key] = (coef, intercept, std)
                 component_sources[component_key] = [demographic]
 
-    # Print statistics about component overlap
-    n_shared = sum(1 for sources in component_sources.values() if len(sources) > 1)
-    n_unique = sum(1 for sources in component_sources.values() if len(sources) == 1)
-    print(f"      Combined {len(demographic_attrs)} demographics:")
-    print(f"        Total components: {len(combined_weights)}")
-    print(f"        Shared components: {n_shared}")
-    print(f"        Unique components: {n_unique}")
+    # Print statistics about component overlap (only if verbose)
+    if verbose:
+        n_shared = sum(1 for sources in component_sources.values() if len(sources) > 1)
+        n_unique = sum(1 for sources in component_sources.values() if len(sources) == 1)
+        print(f"      Combined {len(demographic_attrs)} demographics:")
+        print(f"        Total components: {len(combined_weights)}")
+        print(f"        Shared components: {n_shared}")
+        print(f"        Unique components: {n_unique}")
 
     return combined_weights
 
@@ -1900,14 +1902,18 @@ def evaluate_intersectional_intervention_on_fold(
         demographic_combinations = []  # Track demographic profile of each user
 
         # Process each user individually (since each has unique demographic combination)
+        first_user = True
         for idx, user_profile in test_users.iterrows():
             # Combine weights for this user's specific demographic profile
+            # Print stats only for first user of each question
             combined_weights = combine_demographic_weights(
                 demographic_weights_dict,
                 user_profile,
                 demographic_attrs,
-                demographic_categories
+                demographic_categories,
+                verbose=first_user
             )
+            first_user = False
 
             if len(combined_weights) == 0:
                 print(f"      Warning: No valid weights for user {idx}")
