@@ -1985,17 +1985,29 @@ def run_intervention_phase(args):
                 # Key advanced metrics
                 fold_baseline_entropy = safe_mean('baseline_entropy')
                 fold_intervention_entropy = safe_mean('intervention_entropy')
+                fold_baseline_gini = safe_mean('baseline_gini_diversity')
+                fold_intervention_gini = safe_mean('intervention_gini_diversity')
                 fold_baseline_js_div = safe_mean('baseline_js_divergence')
                 fold_intervention_js_div = safe_mean('intervention_js_divergence')
+                fold_baseline_total_var = safe_mean('baseline_total_variation')
+                fold_intervention_total_var = safe_mean('intervention_total_variation')
                 fold_baseline_macro_f1 = safe_mean('baseline_macro_f1')
                 fold_intervention_macro_f1 = safe_mean('intervention_macro_f1')
+                fold_baseline_balanced_acc = safe_mean('baseline_balanced_accuracy')
+                fold_intervention_balanced_acc = safe_mean('intervention_balanced_accuracy')
+                fold_baseline_cohen = safe_mean('baseline_cohen_kappa')
+                fold_intervention_cohen = safe_mean('intervention_cohen_kappa')
                 fold_baseline_dist_quality = safe_mean('baseline_dist_quality_score')
                 fold_intervention_dist_quality = safe_mean('intervention_dist_quality_score')
 
                 # Improvements
                 fold_entropy_improvement = safe_mean('entropy_improvement')
+                fold_gini_improvement = safe_mean('gini_diversity_improvement')
                 fold_js_div_improvement = safe_mean('js_divergence_improvement')
+                fold_total_var_improvement = safe_mean('total_variation_improvement')
                 fold_macro_f1_improvement = safe_mean('macro_f1_improvement')
+                fold_balanced_acc_improvement = safe_mean('balanced_accuracy_improvement')
+                fold_cohen_improvement = safe_mean('cohen_kappa_improvement')
                 fold_dist_quality_improvement = safe_mean('dist_quality_score_improvement')
 
                 print(f"\nFold {fold_idx + 1} Results:")
@@ -2031,16 +2043,31 @@ def run_intervention_phase(args):
                     'baseline_kendall_tau': fold_baseline_kendall,
                     'intervention_kendall_tau': fold_intervention_kendall,
                     'kendall_improvement': fold_kendall_improvement,
-                    # Advanced metrics
+                    # Advanced metrics - Diversity
                     'baseline_entropy': fold_baseline_entropy,
                     'intervention_entropy': fold_intervention_entropy,
                     'entropy_improvement': fold_entropy_improvement,
+                    'baseline_gini_diversity': fold_baseline_gini,
+                    'intervention_gini_diversity': fold_intervention_gini,
+                    'gini_diversity_improvement': fold_gini_improvement,
+                    # Advanced metrics - Distributional Similarity
                     'baseline_js_divergence': fold_baseline_js_div,
                     'intervention_js_divergence': fold_intervention_js_div,
                     'js_divergence_improvement': fold_js_div_improvement,
+                    'baseline_total_variation': fold_baseline_total_var,
+                    'intervention_total_variation': fold_intervention_total_var,
+                    'total_variation_improvement': fold_total_var_improvement,
+                    # Advanced metrics - Multiclass Performance
                     'baseline_macro_f1': fold_baseline_macro_f1,
                     'intervention_macro_f1': fold_intervention_macro_f1,
                     'macro_f1_improvement': fold_macro_f1_improvement,
+                    'baseline_balanced_accuracy': fold_baseline_balanced_acc,
+                    'intervention_balanced_accuracy': fold_intervention_balanced_acc,
+                    'balanced_accuracy_improvement': fold_balanced_acc_improvement,
+                    'baseline_cohen_kappa': fold_baseline_cohen,
+                    'intervention_cohen_kappa': fold_intervention_cohen,
+                    'cohen_kappa_improvement': fold_cohen_improvement,
+                    # Combined Quality Score
                     'baseline_dist_quality_score': fold_baseline_dist_quality,
                     'intervention_dist_quality_score': fold_intervention_dist_quality,
                     'dist_quality_score_improvement': fold_dist_quality_improvement,
@@ -2098,6 +2125,32 @@ def run_intervention_phase(args):
         fold_intervention_kendalls = []
         fold_kendall_improvements = []
 
+        # Advanced metrics lists
+        fold_baseline_entropies = []
+        fold_intervention_entropies = []
+        fold_entropy_improvements = []
+        fold_baseline_ginis = []
+        fold_intervention_ginis = []
+        fold_gini_improvements = []
+        fold_baseline_js_divs = []
+        fold_intervention_js_divs = []
+        fold_js_div_improvements = []
+        fold_baseline_total_vars = []
+        fold_intervention_total_vars = []
+        fold_total_var_improvements = []
+        fold_baseline_macro_f1s = []
+        fold_intervention_macro_f1s = []
+        fold_macro_f1_improvements = []
+        fold_baseline_balanced_accs = []
+        fold_intervention_balanced_accs = []
+        fold_balanced_acc_improvements = []
+        fold_baseline_cohens = []
+        fold_intervention_cohens = []
+        fold_cohen_improvements = []
+        fold_baseline_dist_qualities = []
+        fold_intervention_dist_qualities = []
+        fold_dist_quality_improvements = []
+
         for fold_data in fold_results:
             if fold_data['aggregate_metrics'] is not None:
                 fold_baseline_accs.append(fold_data['aggregate_metrics']['baseline_accuracy'])
@@ -2111,6 +2164,71 @@ def run_intervention_phase(args):
                     fold_intervention_kendalls.append(fold_data['aggregate_metrics']['intervention_kendall_tau'])
                 if fold_data['aggregate_metrics']['kendall_improvement'] is not None:
                     fold_kendall_improvements.append(fold_data['aggregate_metrics']['kendall_improvement'])
+
+                # Add advanced metrics if available
+                # Entropy
+                if fold_data['aggregate_metrics'].get('baseline_entropy') is not None:
+                    fold_baseline_entropies.append(fold_data['aggregate_metrics']['baseline_entropy'])
+                if fold_data['aggregate_metrics'].get('intervention_entropy') is not None:
+                    fold_intervention_entropies.append(fold_data['aggregate_metrics']['intervention_entropy'])
+                if fold_data['aggregate_metrics'].get('entropy_improvement') is not None:
+                    fold_entropy_improvements.append(fold_data['aggregate_metrics']['entropy_improvement'])
+
+                # Gini Diversity
+                if fold_data['aggregate_metrics'].get('baseline_gini_diversity') is not None:
+                    fold_baseline_ginis.append(fold_data['aggregate_metrics']['baseline_gini_diversity'])
+                if fold_data['aggregate_metrics'].get('intervention_gini_diversity') is not None:
+                    fold_intervention_ginis.append(fold_data['aggregate_metrics']['intervention_gini_diversity'])
+                if fold_data['aggregate_metrics'].get('gini_diversity_improvement') is not None:
+                    fold_gini_improvements.append(fold_data['aggregate_metrics']['gini_diversity_improvement'])
+
+                # JS Divergence
+                if fold_data['aggregate_metrics'].get('baseline_js_divergence') is not None:
+                    fold_baseline_js_divs.append(fold_data['aggregate_metrics']['baseline_js_divergence'])
+                if fold_data['aggregate_metrics'].get('intervention_js_divergence') is not None:
+                    fold_intervention_js_divs.append(fold_data['aggregate_metrics']['intervention_js_divergence'])
+                if fold_data['aggregate_metrics'].get('js_divergence_improvement') is not None:
+                    fold_js_div_improvements.append(fold_data['aggregate_metrics']['js_divergence_improvement'])
+
+                # Total Variation
+                if fold_data['aggregate_metrics'].get('baseline_total_variation') is not None:
+                    fold_baseline_total_vars.append(fold_data['aggregate_metrics']['baseline_total_variation'])
+                if fold_data['aggregate_metrics'].get('intervention_total_variation') is not None:
+                    fold_intervention_total_vars.append(fold_data['aggregate_metrics']['intervention_total_variation'])
+                if fold_data['aggregate_metrics'].get('total_variation_improvement') is not None:
+                    fold_total_var_improvements.append(fold_data['aggregate_metrics']['total_variation_improvement'])
+
+                # Macro F1
+                if fold_data['aggregate_metrics'].get('baseline_macro_f1') is not None:
+                    fold_baseline_macro_f1s.append(fold_data['aggregate_metrics']['baseline_macro_f1'])
+                if fold_data['aggregate_metrics'].get('intervention_macro_f1') is not None:
+                    fold_intervention_macro_f1s.append(fold_data['aggregate_metrics']['intervention_macro_f1'])
+                if fold_data['aggregate_metrics'].get('macro_f1_improvement') is not None:
+                    fold_macro_f1_improvements.append(fold_data['aggregate_metrics']['macro_f1_improvement'])
+
+                # Balanced Accuracy
+                if fold_data['aggregate_metrics'].get('baseline_balanced_accuracy') is not None:
+                    fold_baseline_balanced_accs.append(fold_data['aggregate_metrics']['baseline_balanced_accuracy'])
+                if fold_data['aggregate_metrics'].get('intervention_balanced_accuracy') is not None:
+                    fold_intervention_balanced_accs.append(fold_data['aggregate_metrics']['intervention_balanced_accuracy'])
+                if fold_data['aggregate_metrics'].get('balanced_accuracy_improvement') is not None:
+                    fold_balanced_acc_improvements.append(fold_data['aggregate_metrics']['balanced_accuracy_improvement'])
+
+                # Cohen's Kappa
+                if fold_data['aggregate_metrics'].get('baseline_cohen_kappa') is not None:
+                    fold_baseline_cohens.append(fold_data['aggregate_metrics']['baseline_cohen_kappa'])
+                if fold_data['aggregate_metrics'].get('intervention_cohen_kappa') is not None:
+                    fold_intervention_cohens.append(fold_data['aggregate_metrics']['intervention_cohen_kappa'])
+                if fold_data['aggregate_metrics'].get('cohen_kappa_improvement') is not None:
+                    fold_cohen_improvements.append(fold_data['aggregate_metrics']['cohen_kappa_improvement'])
+
+                # Distribution Quality Score
+                if fold_data['aggregate_metrics'].get('baseline_dist_quality_score') is not None:
+                    fold_baseline_dist_qualities.append(fold_data['aggregate_metrics']['baseline_dist_quality_score'])
+                if fold_data['aggregate_metrics'].get('intervention_dist_quality_score') is not None:
+                    fold_intervention_dist_qualities.append(fold_data['aggregate_metrics']['intervention_dist_quality_score'])
+                if fold_data['aggregate_metrics'].get('dist_quality_score_improvement') is not None:
+                    fold_dist_quality_improvements.append(fold_data['aggregate_metrics']['dist_quality_score_improvement'])
 
         n_folds = len(fold_baseline_accs)
         overall_baseline_mean = np.mean(fold_baseline_accs)
@@ -2140,6 +2258,159 @@ def run_intervention_phase(args):
             overall_kendall_improvement_std = np.std(fold_kendall_improvements, ddof=1) if len(fold_kendall_improvements) > 1 else None
         else:
             overall_kendall_improvement_mean = overall_kendall_improvement_std = None
+
+        # Advanced metrics statistics
+        # Entropy
+        if len(fold_baseline_entropies) > 0:
+            overall_baseline_entropy_mean = np.mean(fold_baseline_entropies)
+            overall_baseline_entropy_std = np.std(fold_baseline_entropies, ddof=1) if len(fold_baseline_entropies) > 1 else None
+        else:
+            overall_baseline_entropy_mean = overall_baseline_entropy_std = None
+
+        if len(fold_intervention_entropies) > 0:
+            overall_intervention_entropy_mean = np.mean(fold_intervention_entropies)
+            overall_intervention_entropy_std = np.std(fold_intervention_entropies, ddof=1) if len(fold_intervention_entropies) > 1 else None
+        else:
+            overall_intervention_entropy_mean = overall_intervention_entropy_std = None
+
+        if len(fold_entropy_improvements) > 0:
+            overall_entropy_improvement_mean = np.mean(fold_entropy_improvements)
+            overall_entropy_improvement_std = np.std(fold_entropy_improvements, ddof=1) if len(fold_entropy_improvements) > 1 else None
+        else:
+            overall_entropy_improvement_mean = overall_entropy_improvement_std = None
+
+        # Gini Diversity
+        if len(fold_baseline_ginis) > 0:
+            overall_baseline_gini_mean = np.mean(fold_baseline_ginis)
+            overall_baseline_gini_std = np.std(fold_baseline_ginis, ddof=1) if len(fold_baseline_ginis) > 1 else None
+        else:
+            overall_baseline_gini_mean = overall_baseline_gini_std = None
+
+        if len(fold_intervention_ginis) > 0:
+            overall_intervention_gini_mean = np.mean(fold_intervention_ginis)
+            overall_intervention_gini_std = np.std(fold_intervention_ginis, ddof=1) if len(fold_intervention_ginis) > 1 else None
+        else:
+            overall_intervention_gini_mean = overall_intervention_gini_std = None
+
+        if len(fold_gini_improvements) > 0:
+            overall_gini_improvement_mean = np.mean(fold_gini_improvements)
+            overall_gini_improvement_std = np.std(fold_gini_improvements, ddof=1) if len(fold_gini_improvements) > 1 else None
+        else:
+            overall_gini_improvement_mean = overall_gini_improvement_std = None
+
+        # JS Divergence
+        if len(fold_baseline_js_divs) > 0:
+            overall_baseline_js_div_mean = np.mean(fold_baseline_js_divs)
+            overall_baseline_js_div_std = np.std(fold_baseline_js_divs, ddof=1) if len(fold_baseline_js_divs) > 1 else None
+        else:
+            overall_baseline_js_div_mean = overall_baseline_js_div_std = None
+
+        if len(fold_intervention_js_divs) > 0:
+            overall_intervention_js_div_mean = np.mean(fold_intervention_js_divs)
+            overall_intervention_js_div_std = np.std(fold_intervention_js_divs, ddof=1) if len(fold_intervention_js_divs) > 1 else None
+        else:
+            overall_intervention_js_div_mean = overall_intervention_js_div_std = None
+
+        if len(fold_js_div_improvements) > 0:
+            overall_js_div_improvement_mean = np.mean(fold_js_div_improvements)
+            overall_js_div_improvement_std = np.std(fold_js_div_improvements, ddof=1) if len(fold_js_div_improvements) > 1 else None
+        else:
+            overall_js_div_improvement_mean = overall_js_div_improvement_std = None
+
+        # Total Variation
+        if len(fold_baseline_total_vars) > 0:
+            overall_baseline_total_var_mean = np.mean(fold_baseline_total_vars)
+            overall_baseline_total_var_std = np.std(fold_baseline_total_vars, ddof=1) if len(fold_baseline_total_vars) > 1 else None
+        else:
+            overall_baseline_total_var_mean = overall_baseline_total_var_std = None
+
+        if len(fold_intervention_total_vars) > 0:
+            overall_intervention_total_var_mean = np.mean(fold_intervention_total_vars)
+            overall_intervention_total_var_std = np.std(fold_intervention_total_vars, ddof=1) if len(fold_intervention_total_vars) > 1 else None
+        else:
+            overall_intervention_total_var_mean = overall_intervention_total_var_std = None
+
+        if len(fold_total_var_improvements) > 0:
+            overall_total_var_improvement_mean = np.mean(fold_total_var_improvements)
+            overall_total_var_improvement_std = np.std(fold_total_var_improvements, ddof=1) if len(fold_total_var_improvements) > 1 else None
+        else:
+            overall_total_var_improvement_mean = overall_total_var_improvement_std = None
+
+        # Macro F1
+        if len(fold_baseline_macro_f1s) > 0:
+            overall_baseline_macro_f1_mean = np.mean(fold_baseline_macro_f1s)
+            overall_baseline_macro_f1_std = np.std(fold_baseline_macro_f1s, ddof=1) if len(fold_baseline_macro_f1s) > 1 else None
+        else:
+            overall_baseline_macro_f1_mean = overall_baseline_macro_f1_std = None
+
+        if len(fold_intervention_macro_f1s) > 0:
+            overall_intervention_macro_f1_mean = np.mean(fold_intervention_macro_f1s)
+            overall_intervention_macro_f1_std = np.std(fold_intervention_macro_f1s, ddof=1) if len(fold_intervention_macro_f1s) > 1 else None
+        else:
+            overall_intervention_macro_f1_mean = overall_intervention_macro_f1_std = None
+
+        if len(fold_macro_f1_improvements) > 0:
+            overall_macro_f1_improvement_mean = np.mean(fold_macro_f1_improvements)
+            overall_macro_f1_improvement_std = np.std(fold_macro_f1_improvements, ddof=1) if len(fold_macro_f1_improvements) > 1 else None
+        else:
+            overall_macro_f1_improvement_mean = overall_macro_f1_improvement_std = None
+
+        # Balanced Accuracy
+        if len(fold_baseline_balanced_accs) > 0:
+            overall_baseline_balanced_acc_mean = np.mean(fold_baseline_balanced_accs)
+            overall_baseline_balanced_acc_std = np.std(fold_baseline_balanced_accs, ddof=1) if len(fold_baseline_balanced_accs) > 1 else None
+        else:
+            overall_baseline_balanced_acc_mean = overall_baseline_balanced_acc_std = None
+
+        if len(fold_intervention_balanced_accs) > 0:
+            overall_intervention_balanced_acc_mean = np.mean(fold_intervention_balanced_accs)
+            overall_intervention_balanced_acc_std = np.std(fold_intervention_balanced_accs, ddof=1) if len(fold_intervention_balanced_accs) > 1 else None
+        else:
+            overall_intervention_balanced_acc_mean = overall_intervention_balanced_acc_std = None
+
+        if len(fold_balanced_acc_improvements) > 0:
+            overall_balanced_acc_improvement_mean = np.mean(fold_balanced_acc_improvements)
+            overall_balanced_acc_improvement_std = np.std(fold_balanced_acc_improvements, ddof=1) if len(fold_balanced_acc_improvements) > 1 else None
+        else:
+            overall_balanced_acc_improvement_mean = overall_balanced_acc_improvement_std = None
+
+        # Cohen's Kappa
+        if len(fold_baseline_cohens) > 0:
+            overall_baseline_cohen_mean = np.mean(fold_baseline_cohens)
+            overall_baseline_cohen_std = np.std(fold_baseline_cohens, ddof=1) if len(fold_baseline_cohens) > 1 else None
+        else:
+            overall_baseline_cohen_mean = overall_baseline_cohen_std = None
+
+        if len(fold_intervention_cohens) > 0:
+            overall_intervention_cohen_mean = np.mean(fold_intervention_cohens)
+            overall_intervention_cohen_std = np.std(fold_intervention_cohens, ddof=1) if len(fold_intervention_cohens) > 1 else None
+        else:
+            overall_intervention_cohen_mean = overall_intervention_cohen_std = None
+
+        if len(fold_cohen_improvements) > 0:
+            overall_cohen_improvement_mean = np.mean(fold_cohen_improvements)
+            overall_cohen_improvement_std = np.std(fold_cohen_improvements, ddof=1) if len(fold_cohen_improvements) > 1 else None
+        else:
+            overall_cohen_improvement_mean = overall_cohen_improvement_std = None
+
+        # Distribution Quality Score
+        if len(fold_baseline_dist_qualities) > 0:
+            overall_baseline_dist_quality_mean = np.mean(fold_baseline_dist_qualities)
+            overall_baseline_dist_quality_std = np.std(fold_baseline_dist_qualities, ddof=1) if len(fold_baseline_dist_qualities) > 1 else None
+        else:
+            overall_baseline_dist_quality_mean = overall_baseline_dist_quality_std = None
+
+        if len(fold_intervention_dist_qualities) > 0:
+            overall_intervention_dist_quality_mean = np.mean(fold_intervention_dist_qualities)
+            overall_intervention_dist_quality_std = np.std(fold_intervention_dist_qualities, ddof=1) if len(fold_intervention_dist_qualities) > 1 else None
+        else:
+            overall_intervention_dist_quality_mean = overall_intervention_dist_quality_std = None
+
+        if len(fold_dist_quality_improvements) > 0:
+            overall_dist_quality_improvement_mean = np.mean(fold_dist_quality_improvements)
+            overall_dist_quality_improvement_std = np.std(fold_dist_quality_improvements, ddof=1) if len(fold_dist_quality_improvements) > 1 else None
+        else:
+            overall_dist_quality_improvement_mean = overall_dist_quality_improvement_std = None
 
         print(f"\nOverall Results (mean ± std across {args.n_folds} folds):")
         if overall_baseline_std is not None:
@@ -2187,18 +2458,116 @@ def run_intervention_phase(args):
                 'intervention_kendall_tau_std': overall_intervention_kendall_std,
                 'kendall_improvement_mean': overall_kendall_improvement_mean,
                 'kendall_improvement_std': overall_kendall_improvement_std,
+                # Advanced metrics - Entropy
+                'baseline_entropy_mean': overall_baseline_entropy_mean,
+                'baseline_entropy_std': overall_baseline_entropy_std,
+                'intervention_entropy_mean': overall_intervention_entropy_mean,
+                'intervention_entropy_std': overall_intervention_entropy_std,
+                'entropy_improvement_mean': overall_entropy_improvement_mean,
+                'entropy_improvement_std': overall_entropy_improvement_std,
+                # Advanced metrics - Gini Diversity
+                'baseline_gini_diversity_mean': overall_baseline_gini_mean,
+                'baseline_gini_diversity_std': overall_baseline_gini_std,
+                'intervention_gini_diversity_mean': overall_intervention_gini_mean,
+                'intervention_gini_diversity_std': overall_intervention_gini_std,
+                'gini_diversity_improvement_mean': overall_gini_improvement_mean,
+                'gini_diversity_improvement_std': overall_gini_improvement_std,
+                # Advanced metrics - JS Divergence
+                'baseline_js_divergence_mean': overall_baseline_js_div_mean,
+                'baseline_js_divergence_std': overall_baseline_js_div_std,
+                'intervention_js_divergence_mean': overall_intervention_js_div_mean,
+                'intervention_js_divergence_std': overall_intervention_js_div_std,
+                'js_divergence_improvement_mean': overall_js_div_improvement_mean,
+                'js_divergence_improvement_std': overall_js_div_improvement_std,
+                # Advanced metrics - Total Variation
+                'baseline_total_variation_mean': overall_baseline_total_var_mean,
+                'baseline_total_variation_std': overall_baseline_total_var_std,
+                'intervention_total_variation_mean': overall_intervention_total_var_mean,
+                'intervention_total_variation_std': overall_intervention_total_var_std,
+                'total_variation_improvement_mean': overall_total_var_improvement_mean,
+                'total_variation_improvement_std': overall_total_var_improvement_std,
+                # Advanced metrics - Macro F1
+                'baseline_macro_f1_mean': overall_baseline_macro_f1_mean,
+                'baseline_macro_f1_std': overall_baseline_macro_f1_std,
+                'intervention_macro_f1_mean': overall_intervention_macro_f1_mean,
+                'intervention_macro_f1_std': overall_intervention_macro_f1_std,
+                'macro_f1_improvement_mean': overall_macro_f1_improvement_mean,
+                'macro_f1_improvement_std': overall_macro_f1_improvement_std,
+                # Advanced metrics - Balanced Accuracy
+                'baseline_balanced_accuracy_mean': overall_baseline_balanced_acc_mean,
+                'baseline_balanced_accuracy_std': overall_baseline_balanced_acc_std,
+                'intervention_balanced_accuracy_mean': overall_intervention_balanced_acc_mean,
+                'intervention_balanced_accuracy_std': overall_intervention_balanced_acc_std,
+                'balanced_accuracy_improvement_mean': overall_balanced_acc_improvement_mean,
+                'balanced_accuracy_improvement_std': overall_balanced_acc_improvement_std,
+                # Advanced metrics - Cohen's Kappa
+                'baseline_cohen_kappa_mean': overall_baseline_cohen_mean,
+                'baseline_cohen_kappa_std': overall_baseline_cohen_std,
+                'intervention_cohen_kappa_mean': overall_intervention_cohen_mean,
+                'intervention_cohen_kappa_std': overall_intervention_cohen_std,
+                'cohen_kappa_improvement_mean': overall_cohen_improvement_mean,
+                'cohen_kappa_improvement_std': overall_cohen_improvement_std,
+                # Advanced metrics - Distribution Quality Score
+                'baseline_dist_quality_score_mean': overall_baseline_dist_quality_mean,
+                'baseline_dist_quality_score_std': overall_baseline_dist_quality_std,
+                'intervention_dist_quality_score_mean': overall_intervention_dist_quality_mean,
+                'intervention_dist_quality_score_std': overall_intervention_dist_quality_std,
+                'dist_quality_score_improvement_mean': overall_dist_quality_improvement_mean,
+                'dist_quality_score_improvement_std': overall_dist_quality_improvement_std,
                 'per_fold_aggregates': {
                     'baseline': fold_baseline_accs,
                     'intervention': fold_intervention_accs,
                     'improvement': fold_improvements,
                     'baseline_kendall': fold_baseline_kendalls,
                     'intervention_kendall': fold_intervention_kendalls,
-                    'kendall_improvement': fold_kendall_improvements
+                    'kendall_improvement': fold_kendall_improvements,
+                    # Advanced metrics per fold
+                    'baseline_entropy': fold_baseline_entropies,
+                    'intervention_entropy': fold_intervention_entropies,
+                    'entropy_improvement': fold_entropy_improvements,
+                    'baseline_gini_diversity': fold_baseline_ginis,
+                    'intervention_gini_diversity': fold_intervention_ginis,
+                    'gini_diversity_improvement': fold_gini_improvements,
+                    'baseline_js_divergence': fold_baseline_js_divs,
+                    'intervention_js_divergence': fold_intervention_js_divs,
+                    'js_divergence_improvement': fold_js_div_improvements,
+                    'baseline_total_variation': fold_baseline_total_vars,
+                    'intervention_total_variation': fold_intervention_total_vars,
+                    'total_variation_improvement': fold_total_var_improvements,
+                    'baseline_macro_f1': fold_baseline_macro_f1s,
+                    'intervention_macro_f1': fold_intervention_macro_f1s,
+                    'macro_f1_improvement': fold_macro_f1_improvements,
+                    'baseline_balanced_accuracy': fold_baseline_balanced_accs,
+                    'intervention_balanced_accuracy': fold_intervention_balanced_accs,
+                    'balanced_accuracy_improvement': fold_balanced_acc_improvements,
+                    'baseline_cohen_kappa': fold_baseline_cohens,
+                    'intervention_cohen_kappa': fold_intervention_cohens,
+                    'cohen_kappa_improvement': fold_cohen_improvements,
+                    'baseline_dist_quality': fold_baseline_dist_qualities,
+                    'intervention_dist_quality': fold_intervention_dist_qualities,
+                    'dist_quality_improvement': fold_dist_quality_improvements
                 },
                 'n_folds': n_folds,
                 'n_baseline_kendall_folds': len(fold_baseline_kendalls),
                 'n_intervention_kendall_folds': len(fold_intervention_kendalls),
-                'n_kendall_improvement_folds': len(fold_kendall_improvements)
+                'n_kendall_improvement_folds': len(fold_kendall_improvements),
+                # Counts for advanced metrics
+                'n_baseline_entropy_folds': len(fold_baseline_entropies),
+                'n_intervention_entropy_folds': len(fold_intervention_entropies),
+                'n_baseline_gini_folds': len(fold_baseline_ginis),
+                'n_intervention_gini_folds': len(fold_intervention_ginis),
+                'n_baseline_js_div_folds': len(fold_baseline_js_divs),
+                'n_intervention_js_div_folds': len(fold_intervention_js_divs),
+                'n_baseline_total_var_folds': len(fold_baseline_total_vars),
+                'n_intervention_total_var_folds': len(fold_intervention_total_vars),
+                'n_baseline_macro_f1_folds': len(fold_baseline_macro_f1s),
+                'n_intervention_macro_f1_folds': len(fold_intervention_macro_f1s),
+                'n_baseline_balanced_acc_folds': len(fold_baseline_balanced_accs),
+                'n_intervention_balanced_acc_folds': len(fold_intervention_balanced_accs),
+                'n_baseline_cohen_folds': len(fold_baseline_cohens),
+                'n_intervention_cohen_folds': len(fold_intervention_cohens),
+                'n_baseline_dist_quality_folds': len(fold_baseline_dist_qualities),
+                'n_intervention_dist_quality_folds': len(fold_intervention_dist_qualities)
             },
             'timestamp': datetime.now().isoformat()
         }
@@ -2221,18 +2590,83 @@ def run_intervention_phase(args):
         'config': vars(args),
         'demographics': {
             demo: {
+                # Basic accuracy metrics
                 'baseline_accuracy_mean': results['overall_metrics']['baseline_accuracy_mean'],
                 'baseline_accuracy_std': results['overall_metrics']['baseline_accuracy_std'],
                 'intervention_accuracy_mean': results['overall_metrics']['intervention_accuracy_mean'],
                 'intervention_accuracy_std': results['overall_metrics']['intervention_accuracy_std'],
                 'improvement_mean': results['overall_metrics']['improvement_mean'],
                 'improvement_std': results['overall_metrics']['improvement_std'],
+
+                # Kendall's tau (ordinal correlation)
                 'baseline_kendall_tau_mean': results['overall_metrics']['baseline_kendall_tau_mean'],
                 'baseline_kendall_tau_std': results['overall_metrics']['baseline_kendall_tau_std'],
                 'intervention_kendall_tau_mean': results['overall_metrics']['intervention_kendall_tau_mean'],
                 'intervention_kendall_tau_std': results['overall_metrics']['intervention_kendall_tau_std'],
                 'kendall_improvement_mean': results['overall_metrics']['kendall_improvement_mean'],
                 'kendall_improvement_std': results['overall_metrics']['kendall_improvement_std'],
+
+                # Advanced metrics - Diversity
+                'baseline_entropy_mean': results['overall_metrics'].get('baseline_entropy_mean'),
+                'baseline_entropy_std': results['overall_metrics'].get('baseline_entropy_std'),
+                'intervention_entropy_mean': results['overall_metrics'].get('intervention_entropy_mean'),
+                'intervention_entropy_std': results['overall_metrics'].get('intervention_entropy_std'),
+                'entropy_improvement_mean': results['overall_metrics'].get('entropy_improvement_mean'),
+                'entropy_improvement_std': results['overall_metrics'].get('entropy_improvement_std'),
+
+                'baseline_gini_diversity_mean': results['overall_metrics'].get('baseline_gini_diversity_mean'),
+                'baseline_gini_diversity_std': results['overall_metrics'].get('baseline_gini_diversity_std'),
+                'intervention_gini_diversity_mean': results['overall_metrics'].get('intervention_gini_diversity_mean'),
+                'intervention_gini_diversity_std': results['overall_metrics'].get('intervention_gini_diversity_std'),
+                'gini_diversity_improvement_mean': results['overall_metrics'].get('gini_diversity_improvement_mean'),
+                'gini_diversity_improvement_std': results['overall_metrics'].get('gini_diversity_improvement_std'),
+
+                # Advanced metrics - Distributional similarity
+                'baseline_js_divergence_mean': results['overall_metrics'].get('baseline_js_divergence_mean'),
+                'baseline_js_divergence_std': results['overall_metrics'].get('baseline_js_divergence_std'),
+                'intervention_js_divergence_mean': results['overall_metrics'].get('intervention_js_divergence_mean'),
+                'intervention_js_divergence_std': results['overall_metrics'].get('intervention_js_divergence_std'),
+                'js_divergence_improvement_mean': results['overall_metrics'].get('js_divergence_improvement_mean'),
+                'js_divergence_improvement_std': results['overall_metrics'].get('js_divergence_improvement_std'),
+
+                'baseline_total_variation_mean': results['overall_metrics'].get('baseline_total_variation_mean'),
+                'baseline_total_variation_std': results['overall_metrics'].get('baseline_total_variation_std'),
+                'intervention_total_variation_mean': results['overall_metrics'].get('intervention_total_variation_mean'),
+                'intervention_total_variation_std': results['overall_metrics'].get('intervention_total_variation_std'),
+                'total_variation_improvement_mean': results['overall_metrics'].get('total_variation_improvement_mean'),
+                'total_variation_improvement_std': results['overall_metrics'].get('total_variation_improvement_std'),
+
+                # Advanced metrics - Multiclass performance
+                'baseline_macro_f1_mean': results['overall_metrics'].get('baseline_macro_f1_mean'),
+                'baseline_macro_f1_std': results['overall_metrics'].get('baseline_macro_f1_std'),
+                'intervention_macro_f1_mean': results['overall_metrics'].get('intervention_macro_f1_mean'),
+                'intervention_macro_f1_std': results['overall_metrics'].get('intervention_macro_f1_std'),
+                'macro_f1_improvement_mean': results['overall_metrics'].get('macro_f1_improvement_mean'),
+                'macro_f1_improvement_std': results['overall_metrics'].get('macro_f1_improvement_std'),
+
+                'baseline_balanced_accuracy_mean': results['overall_metrics'].get('baseline_balanced_accuracy_mean'),
+                'baseline_balanced_accuracy_std': results['overall_metrics'].get('baseline_balanced_accuracy_std'),
+                'intervention_balanced_accuracy_mean': results['overall_metrics'].get('intervention_balanced_accuracy_mean'),
+                'intervention_balanced_accuracy_std': results['overall_metrics'].get('intervention_balanced_accuracy_std'),
+                'balanced_accuracy_improvement_mean': results['overall_metrics'].get('balanced_accuracy_improvement_mean'),
+                'balanced_accuracy_improvement_std': results['overall_metrics'].get('balanced_accuracy_improvement_std'),
+
+                'baseline_cohen_kappa_mean': results['overall_metrics'].get('baseline_cohen_kappa_mean'),
+                'baseline_cohen_kappa_std': results['overall_metrics'].get('baseline_cohen_kappa_std'),
+                'intervention_cohen_kappa_mean': results['overall_metrics'].get('intervention_cohen_kappa_mean'),
+                'intervention_cohen_kappa_std': results['overall_metrics'].get('intervention_cohen_kappa_std'),
+                'cohen_kappa_improvement_mean': results['overall_metrics'].get('cohen_kappa_improvement_mean'),
+                'cohen_kappa_improvement_std': results['overall_metrics'].get('cohen_kappa_improvement_std'),
+
+                # Combined quality score
+                'baseline_dist_quality_score_mean': results['overall_metrics'].get('baseline_dist_quality_score_mean'),
+                'baseline_dist_quality_score_std': results['overall_metrics'].get('baseline_dist_quality_score_std'),
+                'intervention_dist_quality_score_mean': results['overall_metrics'].get('intervention_dist_quality_score_mean'),
+                'intervention_dist_quality_score_std': results['overall_metrics'].get('intervention_dist_quality_score_std'),
+                'dist_quality_score_improvement_mean': results['overall_metrics'].get('dist_quality_score_improvement_mean'),
+                'dist_quality_score_improvement_std': results['overall_metrics'].get('dist_quality_score_improvement_std'),
+
+                # Metadata
                 'n_folds': results['n_folds'],
                 'n_baseline_kendall_folds': results['overall_metrics']['n_baseline_kendall_folds'],
                 'n_intervention_kendall_folds': results['overall_metrics']['n_intervention_kendall_folds'],
