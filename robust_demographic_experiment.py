@@ -2273,9 +2273,9 @@ def run_intervention_phase(args):
     print(f"\nFinal Summary:")
     for demo, results in all_demographic_results.items():
         metrics = results['overall_metrics']
-        print(f"  {demo}: {metrics['baseline_accuracy']*100:.1f}% -> "
-              f"{metrics['intervention_accuracy']*100:.1f}% "
-              f"({metrics['improvement']:+.1f} points)")
+        print(f"  {demo}: {metrics['baseline_accuracy_mean']*100:.1f}% -> "
+              f"{metrics['intervention_accuracy_mean']*100:.1f}% "
+              f"({metrics['improvement_mean']:+.1f} points)")
 
 
 # ============================================================================
