@@ -899,13 +899,17 @@ def filter_activations_by_top_components(
 
 def run_extraction_phase(args):
     """
-    Phase 1: Extract activations for all questions and save to disk.
+    Phase 1: Extract activations for all questions and perform k-fold probing.
 
-    Now includes probing to identify top N layers/heads and only saves
-    activations for those components to reduce memory usage.
+    For each fold:
+    - Identifies top N components using ONLY training questions (probing)
+    - Filters and saves training question activations for those top components
+    - Test questions are NOT saved - they will be extracted fresh during intervention
 
-    This allows interventions to be tested with different configurations
-    without re-extracting activations.
+    This approach:
+    - Reduces memory/disk usage (only saves training activations)
+    - Prevents any data leakage (test questions never influence component selection)
+    - Allows interventions to be tested with different configurations without re-extraction
     """
     print("\n" + "="*80)
     print("PHASE 1: EXTRACTION")
@@ -1097,10 +1101,13 @@ def run_extraction_phase(args):
                 del concatenated_labels
                 torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-                # Filter ALL questions' activations to keep only this fold's top N
-                print(f"\nFiltering all questions to fold {fold_idx + 1}'s top {args.top_k_heads} components...")
+                # Filter ONLY training questions' activations to keep only this fold's top N
+                # Note: Test activations are NOT saved here - they will be extracted fresh
+                # during the intervention phase when running forward passes with intervention hooks
+                print(f"\nFiltering {len(train_questions)} training questions to fold {fold_idx + 1}'s top {args.top_k_heads} components...")
                 fold_question_extractions = {}
-                for question, q_data in question_extractions.items():
+                for question in train_questions:
+                    q_data = question_extractions[question]
                     original_shape = q_data['activations'].shape
                     filtered_activations = filter_activations_by_top_components(
                         q_data['activations'],
@@ -1114,11 +1121,11 @@ def run_extraction_phase(args):
                         'category_names': q_data['category_names']
                     }
                     if question in train_questions[:3]:  # Show first 3 train
-                        print(f"  [Train] {question}: {original_shape} -> {filtered_activations.shape}")
-                    elif question in test_questions[:2]:  # Show first 2 test
-                        print(f"  [Test]  {question}: {original_shape} -> {filtered_activations.shape}")
+                        print(f"  {question}: {original_shape} -> {filtered_activations.shape}")
 
                 # Save fold-specific extraction file
+                # Note: Only training question activations are saved (filtered to top components)
+                # Test questions will be processed fresh during intervention phase
                 fold_extraction_file = output_dir / f"{demographic}_{args.probe_type}_{args.run_id}_fold{fold_idx + 1}_extractions.pkl"
 
                 extraction_data = {
@@ -1135,7 +1142,7 @@ def run_extraction_phase(args):
                     'top_indices': top_indices,
                     'probing_results': probing_data['probing_results'],
                     'intervention_weights': probing_data['intervention_weights'],
-                    'question_extractions': fold_question_extractions,
+                    'question_extractions': fold_question_extractions,  # Contains ONLY train_questions (filtered activations)
                     'timestamp': datetime.now().isoformat()
                 }
 
