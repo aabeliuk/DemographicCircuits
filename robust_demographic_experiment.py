@@ -1836,6 +1836,7 @@ def evaluate_intersectional_intervention_on_fold(
     probe_type: str,
     intervention_strength: float,
     eval_sample_size: int,
+    top_k_heads: int,
     prompt_style: str = "original"
 ) -> Dict:
     """
@@ -1919,17 +1920,35 @@ def evaluate_intersectional_intervention_on_fold(
                 print(f"      Warning: No valid weights for user {idx}")
                 continue
 
-            # Create intervention engine with combined weights
-            engine = EngineClass(model, combined_weights, device)
+            # Sort combined weights by coefficient magnitude (descending)
+            # This ensures we select the top-k most influential components
+            sorted_weights = dict(sorted(
+                combined_weights.items(),
+                key=lambda item: np.linalg.norm(item[1][0]),  # item[1][0] is the coefficient
+                reverse=True
+            ))
+
+            # Show top-k selection info for first user
+            if first_user:
+                actual_top_k = min(top_k_heads, len(sorted_weights))
+                print(f"      Selecting top {actual_top_k} of {len(sorted_weights)} combined components")
+                if actual_top_k < len(sorted_weights):
+                    print(f"        (Using {actual_top_k}/{len(sorted_weights)} components for intervention)")
+
+            # Create intervention engine with sorted combined weights
+            engine = EngineClass(model, sorted_weights, device)
 
             # For intersectional, we always use 'maximize' direction
             # (each demographic's direction is already baked into the coefficients)
             intervention_direction = 'maximize'
 
+            # Use specified top_k (bounded by available components)
+            actual_top_k = min(top_k_heads, len(sorted_weights))
+
             # Config
             config_kwargs = {
                 'intervention_strength': intervention_strength,
-                config_param: len(combined_weights),
+                config_param: actual_top_k,
                 'intervention_direction': intervention_direction
             }
             config = ConfigClass(**config_kwargs)
@@ -2212,6 +2231,7 @@ def run_intervention_phase(args):
 
             # Evaluate intersectional intervention on test fold
             print(f"\nEvaluating intersectional intervention on {len(test_questions)} test questions...")
+            print(f"  Using top {args.top_k_heads} components from combined weights")
             test_results = evaluate_intersectional_intervention_on_fold(
                 model, tokenizer, df, test_questions,
                 args.intersect_demographics,
@@ -2221,6 +2241,7 @@ def run_intervention_phase(args):
                 args.probe_type,
                 args.intervention_strength,
                 args.eval_sample_size,
+                args.top_k_heads,
                 args.prompt_style
             )
 
