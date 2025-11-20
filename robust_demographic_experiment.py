@@ -162,6 +162,12 @@ def parse_arguments():
     parser.add_argument('--demographics', type=str, nargs='+', default=None,
                        help=f'Demographics to test (default: all). Options: {", ".join(ALL_DEMOGRAPHICS)}')
 
+    # Intersectional intervention (applies multiple demographics simultaneously)
+    parser.add_argument('--intersect_demographics', type=str, nargs='+', default=None,
+                       help='Demographics to combine for intersectional intervention (e.g., age gender ideology). '
+                            'When specified, intervention phase will apply all demographic steering vectors simultaneously '
+                            'to test additive effects. Extraction files must exist for all specified demographics.')
+
     # Output configuration
     parser.add_argument('--output_dir', type=str, default='robust_experiment_results',
                        help='Directory for output files (default: robust_experiment_results)')
@@ -201,6 +207,16 @@ def parse_arguments():
     invalid_demos = set(args.demographics) - set(ALL_DEMOGRAPHICS)
     if invalid_demos:
         parser.error(f"Invalid demographics: {invalid_demos}. Valid options: {ALL_DEMOGRAPHICS}")
+
+    # Validate intersectional demographics
+    if args.intersect_demographics is not None:
+        invalid_intersect = set(args.intersect_demographics) - set(ALL_DEMOGRAPHICS)
+        if invalid_intersect:
+            parser.error(f"Invalid intersect_demographics: {invalid_intersect}. Valid options: {ALL_DEMOGRAPHICS}")
+        if len(args.intersect_demographics) < 2:
+            parser.error("intersect_demographics must specify at least 2 demographics to combine")
+        if args.phase == 'extract':
+            parser.error("intersect_demographics can only be used with --phase intervene or --phase both")
 
     # Generate run_id if not specified
     if args.run_id is None:
@@ -1513,6 +1529,88 @@ def compute_advanced_metrics(true_labels: List, predictions: List) -> Dict:
     return metrics
 
 
+def combine_demographic_weights(
+    demographic_weights_dict: Dict[str, Dict],
+    user_profile: pd.Series,
+    demographic_attrs: List[str],
+    demographic_categories: Dict[str, List[str]]
+) -> Dict:
+    """
+    Combine intervention weights from multiple demographics for intersectional intervention.
+
+    This function implements the additive hypothesis: demographic steering vectors are summed
+    when they target the same attention head/layer. This tests if demographic circuits are
+    independent and additive.
+
+    Args:
+        demographic_weights_dict: {demographic_name: intervention_weights}
+            Each intervention_weights is Dict[(layer, head)] -> (coef, intercept, std)
+        user_profile: User's demographic profile (pd.Series with all attributes)
+        demographic_attrs: List of demographics to combine (e.g., ['age', 'gender', 'ideology'])
+        demographic_categories: {demographic_name: [category_names]}
+            e.g., {'age': ['Young', 'Old'], 'gender': ['Male', 'Female']}
+
+    Returns:
+        Combined intervention weights: Dict[(layer, head)] -> (combined_coef, intercept, combined_std)
+        - combined_coef: Sum of normalized coefficients from all demographics
+        - intercept: Average of intercepts (or could use max)
+        - combined_std: Maximum of stds (conservative choice for scaling)
+    """
+    combined_weights = {}
+
+    # Track components from each demographic for analysis
+    component_sources = {}  # (layer, head) -> list of demographics
+
+    for demographic in demographic_attrs:
+        # Get user's category for this demographic
+        user_category = user_profile[demographic]
+        category_names = demographic_categories[demographic]
+
+        if user_category not in category_names:
+            print(f"Warning: User's {demographic} value '{user_category}' not in trained categories {category_names}")
+            continue
+
+        category_idx = category_names.index(user_category)
+
+        # Get intervention weights for this demographic
+        demo_weights = demographic_weights_dict[demographic]
+
+        # Get class-specific weights for user's category
+        class_weights = select_class_specific_weights(demo_weights, category_idx)
+
+        # Add/combine weights for each component
+        for component_key, (coef, intercept, std) in class_weights.items():
+            if component_key in combined_weights:
+                # Component already exists from another demographic - sum coefficients
+                existing_coef, existing_intercept, existing_std = combined_weights[component_key]
+
+                # Sum the coefficients (additive hypothesis)
+                combined_coef = existing_coef + coef
+
+                # Average the intercepts
+                combined_intercept = (existing_intercept + intercept) / 2
+
+                # Use maximum std (conservative)
+                combined_std = max(existing_std, std)
+
+                combined_weights[component_key] = (combined_coef, combined_intercept, combined_std)
+                component_sources[component_key].append(demographic)
+            else:
+                # First demographic to target this component
+                combined_weights[component_key] = (coef, intercept, std)
+                component_sources[component_key] = [demographic]
+
+    # Print statistics about component overlap
+    n_shared = sum(1 for sources in component_sources.values() if len(sources) > 1)
+    n_unique = sum(1 for sources in component_sources.values() if len(sources) == 1)
+    print(f"      Combined {len(demographic_attrs)} demographics:")
+    print(f"        Total components: {len(combined_weights)}")
+    print(f"        Shared components: {n_shared}")
+    print(f"        Unique components: {n_unique}")
+
+    return combined_weights
+
+
 def evaluate_intervention_on_fold(
     model,
     tokenizer,
@@ -1724,6 +1822,238 @@ def evaluate_intervention_on_fold(
     return test_results
 
 
+def evaluate_intersectional_intervention_on_fold(
+    model,
+    tokenizer,
+    df: pd.DataFrame,
+    test_questions: List[str],
+    demographic_attrs: List[str],
+    demographic_weights_dict: Dict[str, Dict],
+    demographic_categories: Dict[str, List[str]],
+    device: str,
+    probe_type: str,
+    intervention_strength: float,
+    eval_sample_size: int,
+    prompt_style: str = "original"
+) -> Dict:
+    """
+    Evaluate intersectional intervention combining multiple demographics simultaneously.
+
+    Args:
+        model: Language model
+        tokenizer: Tokenizer
+        df: ANES dataframe
+        test_questions: Questions to test on
+        demographic_attrs: List of demographics to combine (e.g., ['age', 'gender', 'ideology'])
+        demographic_weights_dict: {demographic_name: intervention_weights}
+        demographic_categories: {demographic_name: [category_names]}
+        device: Device for computation
+        probe_type: 'attention' or 'mlp'
+        intervention_strength: Strength multiplier
+        eval_sample_size: Max samples per question
+        prompt_style: Prompt template style
+
+    Returns:
+        Dict of test results per question, including intersectional metadata
+    """
+    # Determine config class and parameter name
+    if probe_type == 'attention':
+        ConfigClass = InterventionConfig
+        config_param = 'top_k_heads'
+        EngineClass = CircuitInterventionEngine
+    else:  # mlp
+        ConfigClass = MLPInterventionConfig
+        config_param = 'top_k_layers'
+        EngineClass = MLPInterventionEngine
+
+    test_results = {}
+
+    for question in test_questions:
+        # Get test users who have valid values for ALL specified demographics
+        valid_mask = df[question].notna()
+        for demo in demographic_attrs:
+            valid_mask &= df[demo].notna()
+
+        test_users = df[valid_mask].copy()
+
+        if len(test_users) == 0:
+            print(f"    WARNING: No users with valid values for all demographics {demographic_attrs} on question {question}")
+            continue
+
+        if eval_sample_size and len(test_users) > eval_sample_size:
+            test_users = test_users.sample(n=eval_sample_size, random_state=42)
+
+        # Get answer options
+        answer_options = sorted(test_users[question].dropna().unique().tolist())
+
+        if len(answer_options) == 0:
+            continue
+
+        # Print sample size for this question
+        q_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
+        print(f"    Testing {question}: {len(test_users)} samples, {len(answer_options)} answer options")
+        print(f"      {q_label}")
+
+        baseline_predictions = []
+        intervention_predictions = []
+        true_labels = []
+        demographic_combinations = []  # Track demographic profile of each user
+
+        # Process each user individually (since each has unique demographic combination)
+        for idx, user_profile in test_users.iterrows():
+            # Combine weights for this user's specific demographic profile
+            combined_weights = combine_demographic_weights(
+                demographic_weights_dict,
+                user_profile,
+                demographic_attrs,
+                demographic_categories
+            )
+
+            if len(combined_weights) == 0:
+                print(f"      Warning: No valid weights for user {idx}")
+                continue
+
+            # Create intervention engine with combined weights
+            engine = EngineClass(model, combined_weights, device)
+
+            # For intersectional, we always use 'maximize' direction
+            # (each demographic's direction is already baked into the coefficients)
+            intervention_direction = 'maximize'
+
+            # Config
+            config_kwargs = {
+                'intervention_strength': intervention_strength,
+                config_param: len(combined_weights),
+                'intervention_direction': intervention_direction
+            }
+            config = ConfigClass(**config_kwargs)
+
+            # Create prompt (include all demographics)
+            prompt = create_prompt(
+                user_profile, question,
+                exclude_attribute=None,
+                answer_options=answer_options,
+                answer=None,
+                prompt_style=prompt_style
+            )
+
+            # Baseline prediction
+            with torch.no_grad():
+                inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                outputs = model(**inputs)
+                baseline_logits = outputs.logits[:, -1, :].cpu()
+
+            baseline_pred = predict_from_logits(baseline_logits, answer_options, tokenizer)
+            baseline_predictions.append(baseline_pred)
+
+            # Intervention prediction
+            intervention_logits = engine.intervene_activation_steering_logits(
+                prompt, tokenizer, config
+            )
+
+            intervention_pred = predict_from_logits(intervention_logits.cpu(), answer_options, tokenizer)
+            intervention_predictions.append(intervention_pred)
+
+            true_labels.append(user_profile[question])
+
+            # Track demographic combination
+            demo_combo = tuple(user_profile[demo] for demo in demographic_attrs)
+            demographic_combinations.append(demo_combo)
+
+        # Print response distributions
+        print(f"\n      Response Distributions:")
+        true_dist = Counter(true_labels)
+        baseline_dist = Counter(baseline_predictions)
+        intervention_dist = Counter(intervention_predictions)
+
+        print(f"        True labels:        {dict(true_dist)}")
+        print(f"        Baseline preds:     {dict(baseline_dist)}")
+        print(f"        Intervention preds: {dict(intervention_dist)}")
+
+        # Calculate accuracies
+        baseline_acc = accuracy_score(true_labels, baseline_predictions)
+        intervention_acc = accuracy_score(true_labels, intervention_predictions)
+        improvement = (intervention_acc - baseline_acc) * 100
+
+        # Calculate Kendall's tau
+        try:
+            baseline_kendall, baseline_kendall_p = kendalltau(true_labels, baseline_predictions)
+            intervention_kendall, intervention_kendall_p = kendalltau(true_labels, intervention_predictions)
+
+            if np.isnan(baseline_kendall):
+                baseline_kendall = baseline_kendall_p = None
+            if np.isnan(intervention_kendall):
+                intervention_kendall = intervention_kendall_p = None
+
+            if baseline_kendall is not None and intervention_kendall is not None:
+                kendall_improvement = intervention_kendall - baseline_kendall
+            else:
+                kendall_improvement = None
+        except Exception as e:
+            print(f"      Warning: Could not compute Kendall's tau: {e}")
+            baseline_kendall = baseline_kendall_p = None
+            intervention_kendall = intervention_kendall_p = None
+            kendall_improvement = None
+
+        # Calculate advanced metrics
+        baseline_advanced = compute_advanced_metrics(true_labels, baseline_predictions)
+        intervention_advanced = compute_advanced_metrics(true_labels, intervention_predictions)
+
+        # Calculate improvements for key metrics
+        improvements = {}
+        for key in baseline_advanced.keys():
+            if baseline_advanced[key] is not None and intervention_advanced[key] is not None:
+                if key in ['js_divergence', 'total_variation']:
+                    improvements[f'{key}_improvement'] = baseline_advanced[key] - intervention_advanced[key]
+                else:
+                    improvements[f'{key}_improvement'] = intervention_advanced[key] - baseline_advanced[key]
+            else:
+                improvements[f'{key}_improvement'] = None
+
+        # Count unique demographic combinations tested
+        unique_combos = len(set(demographic_combinations))
+        combo_dist = Counter(demographic_combinations)
+
+        test_results[question] = {
+            'baseline_accuracy': baseline_acc,
+            'intervention_accuracy': intervention_acc,
+            'improvement': improvement,
+            'baseline_kendall_tau': baseline_kendall,
+            'baseline_kendall_p': baseline_kendall_p,
+            'intervention_kendall_tau': intervention_kendall,
+            'intervention_kendall_p': intervention_kendall_p,
+            'kendall_improvement': kendall_improvement,
+            # Advanced baseline metrics
+            'baseline_entropy': baseline_advanced['entropy'],
+            'baseline_gini_diversity': baseline_advanced['gini_diversity'],
+            'baseline_js_divergence': baseline_advanced['js_divergence'],
+            'baseline_total_variation': baseline_advanced['total_variation'],
+            'baseline_macro_f1': baseline_advanced['macro_f1'],
+            'baseline_balanced_accuracy': baseline_advanced['balanced_accuracy'],
+            'baseline_cohen_kappa': baseline_advanced['cohen_kappa'],
+            'baseline_dist_quality_score': baseline_advanced['dist_quality_score'],
+            # Advanced intervention metrics
+            'intervention_entropy': intervention_advanced['entropy'],
+            'intervention_gini_diversity': intervention_advanced['gini_diversity'],
+            'intervention_js_divergence': intervention_advanced['js_divergence'],
+            'intervention_total_variation': intervention_advanced['total_variation'],
+            'intervention_macro_f1': intervention_advanced['macro_f1'],
+            'intervention_balanced_accuracy': intervention_advanced['balanced_accuracy'],
+            'intervention_cohen_kappa': intervention_advanced['cohen_kappa'],
+            'intervention_dist_quality_score': intervention_advanced['dist_quality_score'],
+            # Improvements
+            **improvements,
+            'n_samples': len(test_users),
+            # Intersectional-specific metadata
+            'demographics_combined': demographic_attrs,
+            'n_unique_combinations': unique_combos,
+            'combination_distribution': dict(combo_dist)
+        }
+
+    return test_results
+
+
 def find_extraction_file(extraction_dir: Path, demographic: str, probe_type: str, run_id: str = None):
     """Find the extraction file for a demographic. If run_id not specified, find most recent."""
     if run_id:
@@ -1806,6 +2136,203 @@ def run_intervention_phase(args):
     # Process each demographic
     all_demographic_results = {}
 
+    # INTERSECTIONAL MODE: Combine multiple demographics
+    if args.intersect_demographics is not None:
+        print(f"\n{'='*80}")
+        print(f"INTERSECTIONAL INTERVENTION MODE")
+        print(f"Combining demographics: {', '.join(args.intersect_demographics)}")
+        print(f"{'='*80}")
+
+        # Load extraction files for all specified demographics
+        demographic_fold_files = {}
+        demographic_categories = {}
+
+        for demographic in args.intersect_demographics:
+            print(f"\nLoading extractions for {demographic}...")
+            fold_files = []
+            for fold_idx in range(args.n_folds):
+                fold_file = extraction_dir / f"{demographic}_{args.probe_type}_{args.run_id}_fold{fold_idx + 1}_extractions.pkl"
+                if not fold_file.exists():
+                    raise FileNotFoundError(
+                        f"Missing extraction file: {fold_file}\n"
+                        f"Please run extraction phase for {demographic} first with the same run_id"
+                    )
+                fold_files.append(fold_file)
+            demographic_fold_files[demographic] = fold_files
+            print(f"  Found {len(fold_files)} fold files for {demographic}")
+
+            # Load first fold to get category names
+            with open(fold_files[0], 'rb') as f:
+                sample_data = pickle.load(f)
+            question_key = list(sample_data['question_extractions'].keys())[0]
+            demographic_categories[demographic] = sample_data['question_extractions'][question_key]['category_names']
+            print(f"  Categories: {demographic_categories[demographic]}")
+
+        # Process intersectional folds
+        fold_results = []
+
+        for fold_idx in range(args.n_folds):
+            print(f"\n{'-'*80}")
+            print(f"FOLD {fold_idx + 1}/{args.n_folds}")
+            print(f"{'-'*80}")
+
+            # Load all demographic extractions for this fold
+            demographic_weights_dict = {}
+            test_questions = None
+            train_questions = None
+
+            for demographic in args.intersect_demographics:
+                fold_file = demographic_fold_files[demographic][fold_idx]
+                with open(fold_file, 'rb') as f:
+                    extraction_data = pickle.load(f)
+
+                # Validate fold consistency
+                if test_questions is None:
+                    test_questions = extraction_data['test_questions']
+                    train_questions = extraction_data['train_questions']
+                else:
+                    if extraction_data['test_questions'] != test_questions:
+                        raise ValueError(
+                            f"Fold {fold_idx+1}: Test questions don't match between demographics!\n"
+                            f"This likely means extractions were run with different random seeds or folds."
+                        )
+
+                # Get intervention weights from probing results
+                demographic_weights_dict[demographic] = extraction_data['intervention_weights']
+
+                print(f"  Loaded {demographic}: {len(extraction_data['intervention_weights'])} components")
+
+            print(f"\nTest questions ({len(test_questions)}): {test_questions}")
+
+            # Evaluate intersectional intervention on test fold
+            print(f"\nEvaluating intersectional intervention on {len(test_questions)} test questions...")
+            test_results = evaluate_intersectional_intervention_on_fold(
+                model, tokenizer, df, test_questions,
+                args.intersect_demographics,
+                demographic_weights_dict,
+                demographic_categories,
+                args.device,
+                args.probe_type,
+                args.intervention_strength,
+                args.eval_sample_size,
+                args.prompt_style
+            )
+
+            # Aggregate fold results (same as single-demographic case)
+            if test_results:
+                fold_baseline = np.mean([r['baseline_accuracy'] for r in test_results.values()])
+                fold_intervention = np.mean([r['intervention_accuracy'] for r in test_results.values()])
+                fold_improvement = np.mean([r['improvement'] for r in test_results.values()])
+
+                print(f"\nFold {fold_idx + 1} Results:")
+                print(f"  Baseline:     {fold_baseline*100:.1f}%")
+                print(f"  Intervention: {fold_intervention*100:.1f}%")
+                print(f"  Improvement:  {fold_improvement:+.1f} points")
+
+                fold_aggregate_metrics = {
+                    'baseline_accuracy': fold_baseline,
+                    'intervention_accuracy': fold_intervention,
+                    'improvement': fold_improvement,
+                }
+            else:
+                fold_aggregate_metrics = None
+
+            fold_results.append({
+                'fold': fold_idx,
+                'test_questions': test_questions,
+                'test_results': test_results,
+                'aggregate_metrics': fold_aggregate_metrics
+            })
+
+        # Aggregate results across folds
+        print(f"\n{'='*80}")
+        print(f"AGGREGATING INTERSECTIONAL RESULTS")
+        print(f"{'='*80}")
+
+        # Calculate overall metrics
+        fold_baseline_accs = [fd['aggregate_metrics']['baseline_accuracy'] for fd in fold_results if fd['aggregate_metrics']]
+        fold_intervention_accs = [fd['aggregate_metrics']['intervention_accuracy'] for fd in fold_results if fd['aggregate_metrics']]
+        fold_improvements = [fd['aggregate_metrics']['improvement'] for fd in fold_results if fd['aggregate_metrics']]
+
+        n_folds = len(fold_baseline_accs)
+        overall_baseline_mean = np.mean(fold_baseline_accs)
+        overall_baseline_std = np.std(fold_baseline_accs, ddof=1) if n_folds > 1 else None
+        overall_intervention_mean = np.mean(fold_intervention_accs)
+        overall_intervention_std = np.std(fold_intervention_accs, ddof=1) if n_folds > 1 else None
+        overall_improvement_mean = np.mean(fold_improvements)
+        overall_improvement_std = np.std(fold_improvements, ddof=1) if n_folds > 1 else None
+
+        print(f"\nOverall Results (mean ± std across {n_folds} folds):")
+        if overall_baseline_std is not None:
+            print(f"  Baseline:     {overall_baseline_mean*100:.1f}% ± {overall_baseline_std*100:.1f}%")
+            print(f"  Intervention: {overall_intervention_mean*100:.1f}% ± {overall_intervention_std*100:.1f}%")
+            print(f"  Improvement:  {overall_improvement_mean:+.1f} ± {overall_improvement_std:.1f} points")
+        else:
+            print(f"  Baseline:     {overall_baseline_mean*100:.1f}%")
+            print(f"  Intervention: {overall_intervention_mean*100:.1f}%")
+            print(f"  Improvement:  {overall_improvement_mean:+.1f} points")
+
+        # Save intersectional results
+        intersect_name = "+".join(args.intersect_demographics)
+        intersectional_results = {
+            'mode': 'intersectional',
+            'demographics_combined': args.intersect_demographics,
+            'demographic_categories': demographic_categories,
+            'probe_type': args.probe_type,
+            'run_id': args.run_id,
+            'n_folds': args.n_folds,
+            'top_k_heads': args.top_k_heads,
+            'intervention_strength': args.intervention_strength,
+            'fold_results': fold_results,
+            'overall_metrics': {
+                'baseline_accuracy_mean': overall_baseline_mean,
+                'baseline_accuracy_std': overall_baseline_std,
+                'intervention_accuracy_mean': overall_intervention_mean,
+                'intervention_accuracy_std': overall_intervention_std,
+                'improvement_mean': overall_improvement_mean,
+                'improvement_std': overall_improvement_std,
+            },
+            'timestamp': datetime.now().isoformat()
+        }
+
+        result_file = results_dir / f"intersectional_{intersect_name}_{args.probe_type}_{args.run_id}_intervention_results.pkl"
+        with open(result_file, 'wb') as f:
+            pickle.dump(intersectional_results, f)
+        print(f"\nSaved intersectional results: {result_file}")
+
+        all_demographic_results[f'intersectional_{intersect_name}'] = intersectional_results
+
+        # Skip normal demographic loop
+        print(f"\n{'='*80}")
+        print("INTERSECTIONAL INTERVENTION PHASE COMPLETE")
+        print(f"{'='*80}")
+
+        # Save summary
+        summary_file = results_dir / 'intervention_summary.json'
+        summary_data = {
+            'config': vars(args),
+            'mode': 'intersectional',
+            'results': {
+                f'intersectional_{intersect_name}': {
+                    'demographics_combined': args.intersect_demographics,
+                    'baseline_accuracy_mean': intersectional_results['overall_metrics']['baseline_accuracy_mean'],
+                    'baseline_accuracy_std': intersectional_results['overall_metrics']['baseline_accuracy_std'],
+                    'intervention_accuracy_mean': intersectional_results['overall_metrics']['intervention_accuracy_mean'],
+                    'intervention_accuracy_std': intersectional_results['overall_metrics']['intervention_accuracy_std'],
+                    'improvement_mean': intersectional_results['overall_metrics']['improvement_mean'],
+                    'improvement_std': intersectional_results['overall_metrics']['improvement_std'],
+                }
+            },
+            'timestamp': datetime.now().isoformat()
+        }
+
+        with open(summary_file, 'w') as f:
+            json.dump(summary_data, f, indent=2)
+        print(f"\nSummary saved: {summary_file}")
+
+        return  # Exit early for intersectional mode
+
+    # NORMAL MODE: Process each demographic individually
     for demographic in args.demographics:
         print(f"\n{'='*80}")
         print(f"INTERVENING: {demographic.upper()}")
