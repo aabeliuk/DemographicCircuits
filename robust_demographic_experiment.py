@@ -1367,7 +1367,8 @@ def select_class_specific_weights(
     """
     Extract class-specific coefficients for multiclass intervention.
 
-    For binary classification, returns weights unchanged.
+    For binary classification, negates coefficient for category 0 so both categories
+    point toward themselves when using 'maximize' intervention direction.
     For multiclass, selects the coefficient row for the target category.
     """
     class_specific_weights = {}
@@ -1377,8 +1378,11 @@ def select_class_specific_weights(
             # Multiclass: select the row for this category
             class_coef = coef[category_idx]
         else:
-            # Binary: use as-is
-            class_coef = coef
+            # Binary: negate for category 0 so both categories point toward themselves
+            # Ridge coefficient points class0→class1, so:
+            # - Category 0 needs class1→class0 (negate)
+            # - Category 1 needs class0→class1 (keep as-is)
+            class_coef = -coef if category_idx == 0 else coef
 
         class_specific_weights[key] = (class_coef, intercept, std)
 
@@ -1680,14 +1684,10 @@ def evaluate_intervention_on_fold(
             # Create intervention engine with class-specific weights
             engine = EngineClass(model, category_weights, device)
 
-            # Determine intervention direction based on binary vs multiclass
-            if len(category_names) == 2:
-                # Binary classification: use opposite directions for the two classes
-                # Category 0: maximize, Category 1: minimize (opposite sides of decision boundary)
-                intervention_direction = 'maximize' if category_idx == 0 else 'minimize'
-            else:
-                # Multiclass: always maximize toward the class-specific direction
-                intervention_direction = 'maximize'
+            # Always maximize - select_class_specific_weights already orients coefficients correctly
+            # For binary: category 0 gets negated coef, category 1 gets original coef
+            # For multiclass: each category gets its own coefficient row
+            intervention_direction = 'maximize'
 
             # Config for this category
             config_kwargs = {
