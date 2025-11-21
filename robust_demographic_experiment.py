@@ -1920,45 +1920,36 @@ def evaluate_intersectional_intervention_on_fold(
                 first_user = False
                 continue
 
-            # Sort combined weights by coefficient magnitude (descending)
-            # This ensures we select the top-k most influential components
-            sorted_weights = dict(sorted(
-                combined_weights.items(),
-                key=lambda item: np.linalg.norm(item[1][0]),  # item[1][0] is the coefficient
-                reverse=True
-            ))
-
-            # Show top-k selection info for first user
+            # Show component info for first user
             if first_user:
-                actual_top_k = min(top_k_heads, len(sorted_weights))
-                print(f"      Selecting top {actual_top_k} of {len(sorted_weights)} combined components")
-                if actual_top_k < len(sorted_weights):
-                    print(f"        (Using {actual_top_k}/{len(sorted_weights)} components for intervention)")
+                print(f"      Using {len(combined_weights)} combined components from top-{top_k_heads} of each demographic")
 
-                # Show magnitude of top components to diagnose strength
-                top_components = list(sorted_weights.items())[:5]
-                print(f"      Top component magnitudes:", end="")
-                for comp_key, (coef, _, _) in top_components[:3]:
+                # Show magnitude of combined components to diagnose strength
+                sorted_for_display = sorted(
+                    combined_weights.items(),
+                    key=lambda item: np.linalg.norm(item[1][0]),
+                    reverse=True
+                )
+                print(f"      Top combined component magnitudes:", end="")
+                for comp_key, (coef, _, _) in sorted_for_display[:3]:
                     mag = np.linalg.norm(coef)
                     print(f" {mag:.2f}", end="")
                 print()
 
             first_user = False
 
-            # Create intervention engine with sorted combined weights
-            engine = EngineClass(model, sorted_weights, device)
+            # Create intervention engine with combined weights
+            # Note: weights are already top-k from each demographic, so we use ALL of them
+            engine = EngineClass(model, combined_weights, device)
 
             # For intersectional, we always use 'maximize' direction
             # (each demographic's direction is already baked into the coefficients)
             intervention_direction = 'maximize'
 
-            # Use specified top_k (bounded by available components)
-            actual_top_k = min(top_k_heads, len(sorted_weights))
-
-            # Config
+            # Config: use ALL combined components (they're already filtered to top-k per demographic)
             config_kwargs = {
                 'intervention_strength': intervention_strength,
-                config_param: actual_top_k,
+                config_param: len(combined_weights),
                 'intervention_direction': intervention_direction
             }
             config = ConfigClass(**config_kwargs)
@@ -2232,16 +2223,27 @@ def run_intervention_phase(args):
                             f"This likely means extractions were run with different random seeds or folds."
                         )
 
-                # Get intervention weights from probing results
-                demographic_weights_dict[demographic] = extraction_data['intervention_weights']
+                # Get intervention weights from probing results and select top-k per demographic
+                all_weights = extraction_data['intervention_weights']
 
-                print(f"  Loaded {demographic}: {len(extraction_data['intervention_weights'])} components")
+                # Sort by coefficient magnitude and select top-k for THIS demographic
+                sorted_demo_weights = dict(sorted(
+                    all_weights.items(),
+                    key=lambda item: np.linalg.norm(item[1][0]),  # Sort by coefficient magnitude
+                    reverse=True
+                ))
+
+                # Keep only top-k components from this demographic
+                top_k_demo_weights = dict(list(sorted_demo_weights.items())[:args.top_k_heads])
+                demographic_weights_dict[demographic] = top_k_demo_weights
+
+                print(f"  Loaded {demographic}: selected top {len(top_k_demo_weights)} of {len(all_weights)} components")
 
             print(f"\nTest questions ({len(test_questions)}): {test_questions}")
 
             # Evaluate intersectional intervention on test fold
             print(f"\nEvaluating intersectional intervention on {len(test_questions)} test questions...")
-            print(f"  Using top {args.top_k_heads} components from combined weights")
+            print(f"  Using top {args.top_k_heads} components from EACH demographic")
             test_results = evaluate_intersectional_intervention_on_fold(
                 model, tokenizer, df, test_questions,
                 args.intersect_demographics,
