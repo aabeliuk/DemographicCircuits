@@ -2263,15 +2263,114 @@ def run_intervention_phase(args):
                 fold_intervention = np.mean([r['intervention_accuracy'] for r in test_results.values()])
                 fold_improvement = np.mean([r['improvement'] for r in test_results.values()])
 
+                # Calculate Kendall's tau averages (filter out None and NaN values)
+                baseline_kendalls = [r['baseline_kendall_tau'] for r in test_results.values()
+                                    if r['baseline_kendall_tau'] is not None and not (isinstance(r['baseline_kendall_tau'], float) and np.isnan(r['baseline_kendall_tau']))]
+                intervention_kendalls = [r['intervention_kendall_tau'] for r in test_results.values()
+                                        if r['intervention_kendall_tau'] is not None and not (isinstance(r['intervention_kendall_tau'], float) and np.isnan(r['intervention_kendall_tau']))]
+                kendall_improvements = [r['kendall_improvement'] for r in test_results.values()
+                                       if r['kendall_improvement'] is not None and not (isinstance(r['kendall_improvement'], float) and np.isnan(r['kendall_improvement']))]
+
+                fold_baseline_kendall = np.mean(baseline_kendalls) if baseline_kendalls else None
+                fold_intervention_kendall = np.mean(intervention_kendalls) if intervention_kendalls else None
+                fold_kendall_improvement = np.mean(kendall_improvements) if kendall_improvements else None
+
+                # Calculate advanced metrics averages
+                def safe_mean(metric_name):
+                    """Calculate mean for a metric, filtering out None values"""
+                    values = [r[metric_name] for r in test_results.values()
+                             if r.get(metric_name) is not None and not (isinstance(r.get(metric_name), float) and np.isnan(r.get(metric_name)))]
+                    return np.mean(values) if values else None
+
+                # Key advanced metrics
+                fold_baseline_entropy = safe_mean('baseline_entropy')
+                fold_intervention_entropy = safe_mean('intervention_entropy')
+                fold_baseline_gini = safe_mean('baseline_gini_diversity')
+                fold_intervention_gini = safe_mean('intervention_gini_diversity')
+                fold_baseline_js_div = safe_mean('baseline_js_divergence')
+                fold_intervention_js_div = safe_mean('intervention_js_divergence')
+                fold_baseline_total_var = safe_mean('baseline_total_variation')
+                fold_intervention_total_var = safe_mean('intervention_total_variation')
+                fold_baseline_macro_f1 = safe_mean('baseline_macro_f1')
+                fold_intervention_macro_f1 = safe_mean('intervention_macro_f1')
+                fold_baseline_balanced_acc = safe_mean('baseline_balanced_accuracy')
+                fold_intervention_balanced_acc = safe_mean('intervention_balanced_accuracy')
+                fold_baseline_cohen = safe_mean('baseline_cohen_kappa')
+                fold_intervention_cohen = safe_mean('intervention_cohen_kappa')
+                fold_baseline_dist_quality = safe_mean('baseline_dist_quality_score')
+                fold_intervention_dist_quality = safe_mean('intervention_dist_quality_score')
+
+                # Improvements
+                fold_entropy_improvement = safe_mean('entropy_improvement')
+                fold_gini_improvement = safe_mean('gini_diversity_improvement')
+                fold_js_div_improvement = safe_mean('js_divergence_improvement')
+                fold_total_var_improvement = safe_mean('total_variation_improvement')
+                fold_macro_f1_improvement = safe_mean('macro_f1_improvement')
+                fold_balanced_acc_improvement = safe_mean('balanced_accuracy_improvement')
+                fold_cohen_improvement = safe_mean('cohen_kappa_improvement')
+                fold_dist_quality_improvement = safe_mean('dist_quality_score_improvement')
+
                 print(f"\nFold {fold_idx + 1} Results:")
                 print(f"  Baseline:     {fold_baseline*100:.1f}%")
                 print(f"  Intervention: {fold_intervention*100:.1f}%")
                 print(f"  Improvement:  {fold_improvement:+.1f} points")
 
+                # Print Kendall's tau
+                if fold_baseline_kendall is not None or fold_intervention_kendall is not None:
+                    baseline_str = f"{fold_baseline_kendall:.3f}" if fold_baseline_kendall is not None else "N/A"
+                    intervention_str = f"{fold_intervention_kendall:.3f}" if fold_intervention_kendall is not None else "N/A"
+                    improvement_str = f"{fold_kendall_improvement:+.3f}" if fold_kendall_improvement is not None else "N/A"
+                    print(f"  Kendall's tau (Baseline):     {baseline_str}")
+                    print(f"  Kendall's tau (Intervention): {intervention_str}")
+                    print(f"  Kendall's tau Improvement:    {improvement_str}")
+
+                # Print key advanced metrics
+                print(f"\n  Advanced Metrics:")
+                if fold_baseline_entropy is not None:
+                    print(f"    Entropy (Baseline → Intervention):     {fold_baseline_entropy:.3f} → {fold_intervention_entropy:.3f} ({fold_entropy_improvement:+.3f})")
+                if fold_baseline_js_div is not None:
+                    print(f"    JS Divergence (Baseline → Intervention): {fold_baseline_js_div:.3f} → {fold_intervention_js_div:.3f} ({fold_js_div_improvement:+.3f})")
+                if fold_baseline_macro_f1 is not None:
+                    print(f"    Macro F1 (Baseline → Intervention):    {fold_baseline_macro_f1:.3f} → {fold_intervention_macro_f1:.3f} ({fold_macro_f1_improvement:+.3f})")
+                if fold_baseline_dist_quality is not None:
+                    print(f"    Dist Quality (Baseline → Intervention): {fold_baseline_dist_quality:.3f} → {fold_intervention_dist_quality:.3f} ({fold_dist_quality_improvement:+.3f})")
+
                 fold_aggregate_metrics = {
                     'baseline_accuracy': fold_baseline,
                     'intervention_accuracy': fold_intervention,
                     'improvement': fold_improvement,
+                    'baseline_kendall_tau': fold_baseline_kendall,
+                    'intervention_kendall_tau': fold_intervention_kendall,
+                    'kendall_improvement': fold_kendall_improvement,
+                    # Advanced metrics - Diversity
+                    'baseline_entropy': fold_baseline_entropy,
+                    'intervention_entropy': fold_intervention_entropy,
+                    'entropy_improvement': fold_entropy_improvement,
+                    'baseline_gini_diversity': fold_baseline_gini,
+                    'intervention_gini_diversity': fold_intervention_gini,
+                    'gini_diversity_improvement': fold_gini_improvement,
+                    # Advanced metrics - Distributional Similarity
+                    'baseline_js_divergence': fold_baseline_js_div,
+                    'intervention_js_divergence': fold_intervention_js_div,
+                    'js_divergence_improvement': fold_js_div_improvement,
+                    'baseline_total_variation': fold_baseline_total_var,
+                    'intervention_total_variation': fold_intervention_total_var,
+                    'total_variation_improvement': fold_total_var_improvement,
+                    # Advanced metrics - Multiclass Performance
+                    'baseline_macro_f1': fold_baseline_macro_f1,
+                    'intervention_macro_f1': fold_intervention_macro_f1,
+                    'macro_f1_improvement': fold_macro_f1_improvement,
+                    'baseline_balanced_accuracy': fold_baseline_balanced_acc,
+                    'intervention_balanced_accuracy': fold_intervention_balanced_acc,
+                    'balanced_accuracy_improvement': fold_balanced_acc_improvement,
+                    'baseline_cohen_kappa': fold_baseline_cohen,
+                    'intervention_cohen_kappa': fold_intervention_cohen,
+                    'cohen_kappa_improvement': fold_cohen_improvement,
+                    # Combined Quality Score
+                    'baseline_dist_quality_score': fold_baseline_dist_quality,
+                    'intervention_dist_quality_score': fold_intervention_dist_quality,
+                    'dist_quality_score_improvement': fold_dist_quality_improvement,
+                    'n_test_questions': len(test_results)
                 }
             else:
                 fold_aggregate_metrics = None
@@ -2301,6 +2400,53 @@ def run_intervention_phase(args):
         overall_improvement_mean = np.mean(fold_improvements)
         overall_improvement_std = np.std(fold_improvements, ddof=1) if n_folds > 1 else None
 
+        # Aggregate advanced metrics across folds
+        def aggregate_metric(metric_name):
+            """Extract and aggregate a metric across folds (mean and std)"""
+            values = [fd['aggregate_metrics'][metric_name] for fd in fold_results
+                     if fd['aggregate_metrics'] and fd['aggregate_metrics'].get(metric_name) is not None
+                     and not (isinstance(fd['aggregate_metrics'].get(metric_name), float) and np.isnan(fd['aggregate_metrics'].get(metric_name)))]
+            mean = np.mean(values) if values else None
+            std = np.std(values, ddof=1) if len(values) > 1 else None
+            return mean, std
+
+        # Kendall's tau
+        overall_baseline_kendall_mean, overall_baseline_kendall_std = aggregate_metric('baseline_kendall_tau')
+        overall_intervention_kendall_mean, overall_intervention_kendall_std = aggregate_metric('intervention_kendall_tau')
+        overall_kendall_improvement_mean, overall_kendall_improvement_std = aggregate_metric('kendall_improvement')
+
+        # Advanced metrics - Diversity
+        overall_baseline_entropy_mean, overall_baseline_entropy_std = aggregate_metric('baseline_entropy')
+        overall_intervention_entropy_mean, overall_intervention_entropy_std = aggregate_metric('intervention_entropy')
+        overall_entropy_improvement_mean, overall_entropy_improvement_std = aggregate_metric('entropy_improvement')
+        overall_baseline_gini_mean, overall_baseline_gini_std = aggregate_metric('baseline_gini_diversity')
+        overall_intervention_gini_mean, overall_intervention_gini_std = aggregate_metric('intervention_gini_diversity')
+        overall_gini_improvement_mean, overall_gini_improvement_std = aggregate_metric('gini_diversity_improvement')
+
+        # Advanced metrics - Distributional Similarity
+        overall_baseline_js_div_mean, overall_baseline_js_div_std = aggregate_metric('baseline_js_divergence')
+        overall_intervention_js_div_mean, overall_intervention_js_div_std = aggregate_metric('intervention_js_divergence')
+        overall_js_div_improvement_mean, overall_js_div_improvement_std = aggregate_metric('js_divergence_improvement')
+        overall_baseline_total_var_mean, overall_baseline_total_var_std = aggregate_metric('baseline_total_variation')
+        overall_intervention_total_var_mean, overall_intervention_total_var_std = aggregate_metric('intervention_total_variation')
+        overall_total_var_improvement_mean, overall_total_var_improvement_std = aggregate_metric('total_variation_improvement')
+
+        # Advanced metrics - Multiclass Performance
+        overall_baseline_macro_f1_mean, overall_baseline_macro_f1_std = aggregate_metric('baseline_macro_f1')
+        overall_intervention_macro_f1_mean, overall_intervention_macro_f1_std = aggregate_metric('intervention_macro_f1')
+        overall_macro_f1_improvement_mean, overall_macro_f1_improvement_std = aggregate_metric('macro_f1_improvement')
+        overall_baseline_balanced_acc_mean, overall_baseline_balanced_acc_std = aggregate_metric('baseline_balanced_accuracy')
+        overall_intervention_balanced_acc_mean, overall_intervention_balanced_acc_std = aggregate_metric('intervention_balanced_accuracy')
+        overall_balanced_acc_improvement_mean, overall_balanced_acc_improvement_std = aggregate_metric('balanced_accuracy_improvement')
+        overall_baseline_cohen_mean, overall_baseline_cohen_std = aggregate_metric('baseline_cohen_kappa')
+        overall_intervention_cohen_mean, overall_intervention_cohen_std = aggregate_metric('intervention_cohen_kappa')
+        overall_cohen_improvement_mean, overall_cohen_improvement_std = aggregate_metric('cohen_kappa_improvement')
+
+        # Combined Quality Score
+        overall_baseline_dist_quality_mean, overall_baseline_dist_quality_std = aggregate_metric('baseline_dist_quality_score')
+        overall_intervention_dist_quality_mean, overall_intervention_dist_quality_std = aggregate_metric('intervention_dist_quality_score')
+        overall_dist_quality_improvement_mean, overall_dist_quality_improvement_std = aggregate_metric('dist_quality_score_improvement')
+
         print(f"\nOverall Results (mean ± std across {n_folds} folds):")
         if overall_baseline_std is not None:
             print(f"  Baseline:     {overall_baseline_mean*100:.1f}% ± {overall_baseline_std*100:.1f}%")
@@ -2324,12 +2470,72 @@ def run_intervention_phase(args):
             'intervention_strength': args.intervention_strength,
             'fold_results': fold_results,
             'overall_metrics': {
+                # Basic accuracy metrics
                 'baseline_accuracy_mean': overall_baseline_mean,
                 'baseline_accuracy_std': overall_baseline_std,
                 'intervention_accuracy_mean': overall_intervention_mean,
                 'intervention_accuracy_std': overall_intervention_std,
                 'improvement_mean': overall_improvement_mean,
                 'improvement_std': overall_improvement_std,
+                # Kendall's tau (ordinal correlation)
+                'baseline_kendall_tau_mean': overall_baseline_kendall_mean,
+                'baseline_kendall_tau_std': overall_baseline_kendall_std,
+                'intervention_kendall_tau_mean': overall_intervention_kendall_mean,
+                'intervention_kendall_tau_std': overall_intervention_kendall_std,
+                'kendall_improvement_mean': overall_kendall_improvement_mean,
+                'kendall_improvement_std': overall_kendall_improvement_std,
+                # Advanced metrics - Diversity
+                'baseline_entropy_mean': overall_baseline_entropy_mean,
+                'baseline_entropy_std': overall_baseline_entropy_std,
+                'intervention_entropy_mean': overall_intervention_entropy_mean,
+                'intervention_entropy_std': overall_intervention_entropy_std,
+                'entropy_improvement_mean': overall_entropy_improvement_mean,
+                'entropy_improvement_std': overall_entropy_improvement_std,
+                'baseline_gini_diversity_mean': overall_baseline_gini_mean,
+                'baseline_gini_diversity_std': overall_baseline_gini_std,
+                'intervention_gini_diversity_mean': overall_intervention_gini_mean,
+                'intervention_gini_diversity_std': overall_intervention_gini_std,
+                'gini_diversity_improvement_mean': overall_gini_improvement_mean,
+                'gini_diversity_improvement_std': overall_gini_improvement_std,
+                # Advanced metrics - Distributional Similarity
+                'baseline_js_divergence_mean': overall_baseline_js_div_mean,
+                'baseline_js_divergence_std': overall_baseline_js_div_std,
+                'intervention_js_divergence_mean': overall_intervention_js_div_mean,
+                'intervention_js_divergence_std': overall_intervention_js_div_std,
+                'js_divergence_improvement_mean': overall_js_div_improvement_mean,
+                'js_divergence_improvement_std': overall_js_div_improvement_std,
+                'baseline_total_variation_mean': overall_baseline_total_var_mean,
+                'baseline_total_variation_std': overall_baseline_total_var_std,
+                'intervention_total_variation_mean': overall_intervention_total_var_mean,
+                'intervention_total_variation_std': overall_intervention_total_var_std,
+                'total_variation_improvement_mean': overall_total_var_improvement_mean,
+                'total_variation_improvement_std': overall_total_var_improvement_std,
+                # Advanced metrics - Multiclass Performance
+                'baseline_macro_f1_mean': overall_baseline_macro_f1_mean,
+                'baseline_macro_f1_std': overall_baseline_macro_f1_std,
+                'intervention_macro_f1_mean': overall_intervention_macro_f1_mean,
+                'intervention_macro_f1_std': overall_intervention_macro_f1_std,
+                'macro_f1_improvement_mean': overall_macro_f1_improvement_mean,
+                'macro_f1_improvement_std': overall_macro_f1_improvement_std,
+                'baseline_balanced_accuracy_mean': overall_baseline_balanced_acc_mean,
+                'baseline_balanced_accuracy_std': overall_baseline_balanced_acc_std,
+                'intervention_balanced_accuracy_mean': overall_intervention_balanced_acc_mean,
+                'intervention_balanced_accuracy_std': overall_intervention_balanced_acc_std,
+                'balanced_accuracy_improvement_mean': overall_balanced_acc_improvement_mean,
+                'balanced_accuracy_improvement_std': overall_balanced_acc_improvement_std,
+                'baseline_cohen_kappa_mean': overall_baseline_cohen_mean,
+                'baseline_cohen_kappa_std': overall_baseline_cohen_std,
+                'intervention_cohen_kappa_mean': overall_intervention_cohen_mean,
+                'intervention_cohen_kappa_std': overall_intervention_cohen_std,
+                'cohen_kappa_improvement_mean': overall_cohen_improvement_mean,
+                'cohen_kappa_improvement_std': overall_cohen_improvement_std,
+                # Combined Quality Score
+                'baseline_dist_quality_score_mean': overall_baseline_dist_quality_mean,
+                'baseline_dist_quality_score_std': overall_baseline_dist_quality_std,
+                'intervention_dist_quality_score_mean': overall_intervention_dist_quality_mean,
+                'intervention_dist_quality_score_std': overall_intervention_dist_quality_std,
+                'dist_quality_score_improvement_mean': overall_dist_quality_improvement_mean,
+                'dist_quality_score_improvement_std': overall_dist_quality_improvement_std,
             },
             'timestamp': datetime.now().isoformat()
         }
@@ -2347,19 +2553,88 @@ def run_intervention_phase(args):
         print(f"{'='*80}")
 
         # Save summary
-        summary_file = results_dir / 'intervention_summary.json'
+        summary_file = results_dir / f'intervention_summary_{args.run_id}.json'
         summary_data = {
             'config': vars(args),
             'mode': 'intersectional',
             'results': {
                 f'intersectional_{intersect_name}': {
                     'demographics_combined': args.intersect_demographics,
+                    # Basic accuracy metrics
                     'baseline_accuracy_mean': intersectional_results['overall_metrics']['baseline_accuracy_mean'],
                     'baseline_accuracy_std': intersectional_results['overall_metrics']['baseline_accuracy_std'],
                     'intervention_accuracy_mean': intersectional_results['overall_metrics']['intervention_accuracy_mean'],
                     'intervention_accuracy_std': intersectional_results['overall_metrics']['intervention_accuracy_std'],
                     'improvement_mean': intersectional_results['overall_metrics']['improvement_mean'],
                     'improvement_std': intersectional_results['overall_metrics']['improvement_std'],
+
+                    # Kendall's tau (ordinal correlation)
+                    'baseline_kendall_tau_mean': intersectional_results['overall_metrics']['baseline_kendall_tau_mean'],
+                    'baseline_kendall_tau_std': intersectional_results['overall_metrics']['baseline_kendall_tau_std'],
+                    'intervention_kendall_tau_mean': intersectional_results['overall_metrics']['intervention_kendall_tau_mean'],
+                    'intervention_kendall_tau_std': intersectional_results['overall_metrics']['intervention_kendall_tau_std'],
+                    'kendall_improvement_mean': intersectional_results['overall_metrics']['kendall_improvement_mean'],
+                    'kendall_improvement_std': intersectional_results['overall_metrics']['kendall_improvement_std'],
+
+                    # Advanced metrics - Diversity
+                    'baseline_entropy_mean': intersectional_results['overall_metrics']['baseline_entropy_mean'],
+                    'baseline_entropy_std': intersectional_results['overall_metrics']['baseline_entropy_std'],
+                    'intervention_entropy_mean': intersectional_results['overall_metrics']['intervention_entropy_mean'],
+                    'intervention_entropy_std': intersectional_results['overall_metrics']['intervention_entropy_std'],
+                    'entropy_improvement_mean': intersectional_results['overall_metrics']['entropy_improvement_mean'],
+                    'entropy_improvement_std': intersectional_results['overall_metrics']['entropy_improvement_std'],
+
+                    'baseline_gini_diversity_mean': intersectional_results['overall_metrics']['baseline_gini_diversity_mean'],
+                    'baseline_gini_diversity_std': intersectional_results['overall_metrics']['baseline_gini_diversity_std'],
+                    'intervention_gini_diversity_mean': intersectional_results['overall_metrics']['intervention_gini_diversity_mean'],
+                    'intervention_gini_diversity_std': intersectional_results['overall_metrics']['intervention_gini_diversity_std'],
+                    'gini_diversity_improvement_mean': intersectional_results['overall_metrics']['gini_diversity_improvement_mean'],
+                    'gini_diversity_improvement_std': intersectional_results['overall_metrics']['gini_diversity_improvement_std'],
+
+                    # Advanced metrics - Distributional Similarity
+                    'baseline_js_divergence_mean': intersectional_results['overall_metrics']['baseline_js_divergence_mean'],
+                    'baseline_js_divergence_std': intersectional_results['overall_metrics']['baseline_js_divergence_std'],
+                    'intervention_js_divergence_mean': intersectional_results['overall_metrics']['intervention_js_divergence_mean'],
+                    'intervention_js_divergence_std': intersectional_results['overall_metrics']['intervention_js_divergence_std'],
+                    'js_divergence_improvement_mean': intersectional_results['overall_metrics']['js_divergence_improvement_mean'],
+                    'js_divergence_improvement_std': intersectional_results['overall_metrics']['js_divergence_improvement_std'],
+
+                    'baseline_total_variation_mean': intersectional_results['overall_metrics']['baseline_total_variation_mean'],
+                    'baseline_total_variation_std': intersectional_results['overall_metrics']['baseline_total_variation_std'],
+                    'intervention_total_variation_mean': intersectional_results['overall_metrics']['intervention_total_variation_mean'],
+                    'intervention_total_variation_std': intersectional_results['overall_metrics']['intervention_total_variation_std'],
+                    'total_variation_improvement_mean': intersectional_results['overall_metrics']['total_variation_improvement_mean'],
+                    'total_variation_improvement_std': intersectional_results['overall_metrics']['total_variation_improvement_std'],
+
+                    # Advanced metrics - Multiclass Performance
+                    'baseline_macro_f1_mean': intersectional_results['overall_metrics']['baseline_macro_f1_mean'],
+                    'baseline_macro_f1_std': intersectional_results['overall_metrics']['baseline_macro_f1_std'],
+                    'intervention_macro_f1_mean': intersectional_results['overall_metrics']['intervention_macro_f1_mean'],
+                    'intervention_macro_f1_std': intersectional_results['overall_metrics']['intervention_macro_f1_std'],
+                    'macro_f1_improvement_mean': intersectional_results['overall_metrics']['macro_f1_improvement_mean'],
+                    'macro_f1_improvement_std': intersectional_results['overall_metrics']['macro_f1_improvement_std'],
+
+                    'baseline_balanced_accuracy_mean': intersectional_results['overall_metrics']['baseline_balanced_accuracy_mean'],
+                    'baseline_balanced_accuracy_std': intersectional_results['overall_metrics']['baseline_balanced_accuracy_std'],
+                    'intervention_balanced_accuracy_mean': intersectional_results['overall_metrics']['intervention_balanced_accuracy_mean'],
+                    'intervention_balanced_accuracy_std': intersectional_results['overall_metrics']['intervention_balanced_accuracy_std'],
+                    'balanced_accuracy_improvement_mean': intersectional_results['overall_metrics']['balanced_accuracy_improvement_mean'],
+                    'balanced_accuracy_improvement_std': intersectional_results['overall_metrics']['balanced_accuracy_improvement_std'],
+
+                    'baseline_cohen_kappa_mean': intersectional_results['overall_metrics']['baseline_cohen_kappa_mean'],
+                    'baseline_cohen_kappa_std': intersectional_results['overall_metrics']['baseline_cohen_kappa_std'],
+                    'intervention_cohen_kappa_mean': intersectional_results['overall_metrics']['intervention_cohen_kappa_mean'],
+                    'intervention_cohen_kappa_std': intersectional_results['overall_metrics']['intervention_cohen_kappa_std'],
+                    'cohen_kappa_improvement_mean': intersectional_results['overall_metrics']['cohen_kappa_improvement_mean'],
+                    'cohen_kappa_improvement_std': intersectional_results['overall_metrics']['cohen_kappa_improvement_std'],
+
+                    # Combined Quality Score
+                    'baseline_dist_quality_score_mean': intersectional_results['overall_metrics']['baseline_dist_quality_score_mean'],
+                    'baseline_dist_quality_score_std': intersectional_results['overall_metrics']['baseline_dist_quality_score_std'],
+                    'intervention_dist_quality_score_mean': intersectional_results['overall_metrics']['intervention_dist_quality_score_mean'],
+                    'intervention_dist_quality_score_std': intersectional_results['overall_metrics']['intervention_dist_quality_score_std'],
+                    'dist_quality_score_improvement_mean': intersectional_results['overall_metrics']['dist_quality_score_improvement_mean'],
+                    'dist_quality_score_improvement_std': intersectional_results['overall_metrics']['dist_quality_score_improvement_std'],
                 }
             },
             'timestamp': datetime.now().isoformat()
@@ -3158,7 +3433,7 @@ def run_intervention_phase(args):
     print("INTERVENTION PHASE COMPLETE")
     print(f"{'='*80}")
 
-    summary_file = results_dir / 'intervention_summary.json'
+    summary_file = results_dir / f'intervention_summary_{args.run_id}.json'
     summary_data = {
         'config': vars(args),
         'demographics': {
