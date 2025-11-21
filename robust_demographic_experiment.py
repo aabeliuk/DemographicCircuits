@@ -1914,10 +1914,10 @@ def evaluate_intersectional_intervention_on_fold(
                 demographic_categories,
                 verbose=first_user
             )
-            first_user = False
 
             if len(combined_weights) == 0:
                 print(f"      Warning: No valid weights for user {idx}")
+                first_user = False
                 continue
 
             # Sort combined weights by coefficient magnitude (descending)
@@ -1934,6 +1934,16 @@ def evaluate_intersectional_intervention_on_fold(
                 print(f"      Selecting top {actual_top_k} of {len(sorted_weights)} combined components")
                 if actual_top_k < len(sorted_weights):
                     print(f"        (Using {actual_top_k}/{len(sorted_weights)} components for intervention)")
+
+                # Show magnitude of top components to diagnose strength
+                top_components = list(sorted_weights.items())[:5]
+                print(f"      Top component magnitudes:", end="")
+                for comp_key, (coef, _, _) in top_components[:3]:
+                    mag = np.linalg.norm(coef)
+                    print(f" {mag:.2f}", end="")
+                print()
+
+            first_user = False
 
             # Create intervention engine with sorted combined weights
             engine = EngineClass(model, sorted_weights, device)
