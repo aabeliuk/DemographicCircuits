@@ -1733,9 +1733,14 @@ def evaluate_intervention_on_fold(
         baseline_dist = Counter(baseline_predictions)
         intervention_dist = Counter(intervention_predictions)
 
-        print(f"        True labels:        {dict(true_dist)}")
-        print(f"        Baseline preds:     {dict(baseline_dist)}")
-        print(f"        Intervention preds: {dict(intervention_dist)}")
+        # Sort by answer_options order for consistent display
+        sorted_true = {k: true_dist[k] for k in answer_options if k in true_dist}
+        sorted_baseline = {k: baseline_dist[k] for k in answer_options if k in baseline_dist}
+        sorted_intervention = {k: intervention_dist[k] for k in answer_options if k in intervention_dist}
+
+        print(f"        True labels:        {sorted_true}")
+        print(f"        Baseline preds:     {sorted_baseline}")
+        print(f"        Intervention preds: {sorted_intervention}")
 
         # Check for prediction collapse
         if len(baseline_dist) == 1:
@@ -1993,9 +1998,14 @@ def evaluate_intersectional_intervention_on_fold(
         baseline_dist = Counter(baseline_predictions)
         intervention_dist = Counter(intervention_predictions)
 
-        print(f"        True labels:        {dict(true_dist)}")
-        print(f"        Baseline preds:     {dict(baseline_dist)}")
-        print(f"        Intervention preds: {dict(intervention_dist)}")
+        # Sort by answer_options order for consistent display
+        sorted_true = {k: true_dist[k] for k in answer_options if k in true_dist}
+        sorted_baseline = {k: baseline_dist[k] for k in answer_options if k in baseline_dist}
+        sorted_intervention = {k: intervention_dist[k] for k in answer_options if k in intervention_dist}
+
+        print(f"        True labels:        {sorted_true}")
+        print(f"        Baseline preds:     {sorted_baseline}")
+        print(f"        Intervention preds: {sorted_intervention}")
 
         # Calculate accuracies
         baseline_acc = accuracy_score(true_labels, baseline_predictions)
