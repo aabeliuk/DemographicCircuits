@@ -2550,7 +2550,7 @@ def run_intervention_phase(args):
             'timestamp': datetime.now().isoformat()
         }
 
-        result_file = results_dir / f"intersectional_{intersect_name}_{args.probe_type}_{args.run_id}_intervention_results.pkl"
+        result_file = results_dir / f"intersectional_{intersect_name}_{args.probe_type}_k{args.top_k_heads}_s{args.intervention_strength}_{args.run_id}_intervention_results.pkl"
         with open(result_file, 'wb') as f:
             pickle.dump(intersectional_results, f)
         print(f"\nSaved intersectional results: {result_file}")
@@ -2563,7 +2563,7 @@ def run_intervention_phase(args):
         print(f"{'='*80}")
 
         # Save summary
-        summary_file = results_dir / f'intervention_summary_{args.run_id}.json'
+        summary_file = results_dir / f'intervention_summary_{args.probe_type}_k{args.top_k_heads}_s{args.intervention_strength}_{args.run_id}.json'
         summary_data = {
             'config': vars(args),
             'mode': 'intersectional',
@@ -3430,7 +3430,7 @@ def run_intervention_phase(args):
             'timestamp': datetime.now().isoformat()
         }
 
-        result_file = results_dir / f"{demographic}_{args.probe_type}_{args.run_id}_intervention_results.pkl"
+        result_file = results_dir / f"{demographic}_{args.probe_type}_k{args.top_k_heads}_s{args.intervention_strength}_{args.run_id}_intervention_results.pkl"
         with open(result_file, 'wb') as f:
             pickle.dump(demographic_results, f)
 
@@ -3443,7 +3443,7 @@ def run_intervention_phase(args):
     print("INTERVENTION PHASE COMPLETE")
     print(f"{'='*80}")
 
-    summary_file = results_dir / f'intervention_summary_{args.run_id}.json'
+    summary_file = results_dir / f'intervention_summary_{args.probe_type}_k{args.top_k_heads}_s{args.intervention_strength}_{args.run_id}.json'
     summary_data = {
         'config': vars(args),
         'demographics': {
