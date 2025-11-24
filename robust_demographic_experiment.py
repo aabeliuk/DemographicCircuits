@@ -1346,7 +1346,10 @@ def train_weights_on_prefiltered_activations(
 
 
 def predict_from_logits(logits: torch.Tensor, answer_options: List, tokenizer) -> str:
-    """Get prediction from logits"""
+    """
+    Get prediction from logits (simple first-token method).
+    DEPRECATED: Use predict_from_logits_multitoken for proper multi-token handling.
+    """
     option_logits = []
     for option in answer_options:
         option_str = str(option)
@@ -1358,6 +1361,86 @@ def predict_from_logits(logits: torch.Tensor, answer_options: List, tokenizer) -
 
     predicted_idx = np.argmax(option_logits)
     return answer_options[predicted_idx]
+
+
+def predict_from_logits_multitoken(
+    model,
+    tokenizer,
+    prompt: str,
+    answer_options: List[str],
+    device: str,
+    use_intervention: bool = False,
+    intervention_engine = None,
+    intervention_config = None
+) -> str:
+    """
+    Get prediction using proper multi-token sequence probability with length normalization.
+
+    For each answer option, computes the log-probability of the full token sequence
+    autoregressively, then normalizes by sequence length to avoid bias toward short answers.
+
+    Args:
+        model: The language model
+        tokenizer: Tokenizer
+        prompt: Full prompt text (context for generation)
+        answer_options: List of possible answer strings
+        device: Device for computation
+        use_intervention: Whether to apply intervention during generation
+        intervention_engine: Intervention engine (required if use_intervention=True)
+        intervention_config: Intervention config (required if use_intervention=True)
+
+    Returns:
+        Predicted answer option (string)
+    """
+    best_score = float('-inf')
+    best_option = None
+
+    for option in answer_options:
+        option_str = str(option)
+        # Tokenize option with space prefix (matches training data format)
+        option_tokens = tokenizer.encode(f" {option_str}", add_special_tokens=False)
+
+        if len(option_tokens) == 0:
+            continue
+
+        # Compute log-probability of sequence autoregressively
+        log_prob = 0.0
+        current_prompt = prompt
+
+        for token_id in option_tokens:
+            # Get logits for current prompt
+            if use_intervention and intervention_engine is not None:
+                # Use intervention engine (applies intervention during forward pass)
+                current_logits = intervention_engine.intervene_activation_steering_logits(
+                    current_prompt, tokenizer, intervention_config
+                )
+            else:
+                # Standard forward pass
+                inputs = tokenizer(current_prompt, return_tensors="pt", truncation=True, max_length=512)
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    outputs = model(**inputs)
+                    current_logits = outputs.logits[:, -1, :]
+
+            # Convert logits to log-probabilities
+            log_probs = torch.log_softmax(current_logits, dim=-1)
+
+            # Add log-probability of this specific token
+            log_prob += log_probs[0, token_id].item()
+
+            # Append token to prompt for next iteration (autoregressive)
+            token_text = tokenizer.decode([token_id], skip_special_tokens=True)
+            current_prompt += token_text
+
+        # Length-normalize: divide by number of tokens
+        # This prevents bias toward shorter sequences
+        normalized_score = log_prob / len(option_tokens)
+
+        if normalized_score > best_score:
+            best_score = normalized_score
+            best_option = option_str
+
+    return best_option if best_option is not None else answer_options[0]
 
 
 def select_class_specific_weights(
@@ -1707,22 +1790,20 @@ def evaluate_intervention_on_fold(
                     prompt_style=prompt_style
                 )
 
-                # Baseline prediction
-                with torch.no_grad():
-                    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
-                    outputs = model(**inputs)
-                    baseline_logits = outputs.logits[:, -1, :].cpu()
-
-                baseline_pred = predict_from_logits(baseline_logits, answer_options, tokenizer)
+                # Baseline prediction (multi-token with length normalization)
+                baseline_pred = predict_from_logits_multitoken(
+                    model, tokenizer, prompt, answer_options, device,
+                    use_intervention=False
+                )
                 baseline_predictions.append(baseline_pred)
 
-                # Intervention prediction with class-specific direction
-                intervention_logits = engine.intervene_activation_steering_logits(
-                    prompt, tokenizer, config
+                # Intervention prediction (multi-token with intervention applied)
+                intervention_pred = predict_from_logits_multitoken(
+                    model, tokenizer, prompt, answer_options, device,
+                    use_intervention=True,
+                    intervention_engine=engine,
+                    intervention_config=config
                 )
-
-                intervention_pred = predict_from_logits(intervention_logits.cpu(), answer_options, tokenizer)
                 intervention_predictions.append(intervention_pred)
 
                 true_labels.append(user_profile[question])
@@ -1968,22 +2049,20 @@ def evaluate_intersectional_intervention_on_fold(
                 prompt_style=prompt_style
             )
 
-            # Baseline prediction
-            with torch.no_grad():
-                inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-                outputs = model(**inputs)
-                baseline_logits = outputs.logits[:, -1, :].cpu()
-
-            baseline_pred = predict_from_logits(baseline_logits, answer_options, tokenizer)
+            # Baseline prediction (multi-token with length normalization)
+            baseline_pred = predict_from_logits_multitoken(
+                model, tokenizer, prompt, answer_options, device,
+                use_intervention=False
+            )
             baseline_predictions.append(baseline_pred)
 
-            # Intervention prediction
-            intervention_logits = engine.intervene_activation_steering_logits(
-                prompt, tokenizer, config
+            # Intervention prediction (multi-token with intervention applied)
+            intervention_pred = predict_from_logits_multitoken(
+                model, tokenizer, prompt, answer_options, device,
+                use_intervention=True,
+                intervention_engine=engine,
+                intervention_config=config
             )
-
-            intervention_pred = predict_from_logits(intervention_logits.cpu(), answer_options, tokenizer)
             intervention_predictions.append(intervention_pred)
 
             true_labels.append(user_profile[question])
