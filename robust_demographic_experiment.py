@@ -1865,13 +1865,57 @@ def evaluate_intervention_on_fold(
         total_samples = len(test_users)
         sample_pbar = tqdm(total=total_samples, desc=f"      Processing samples", leave=False)
 
-        # Group users by category for efficient batch processing
+        # PHASE 1: Collect all baseline predictions (NO hooks active)
+        # This ensures baseline predictions are unaffected by intervention
+        user_data_by_category = {}  # Store user data for phase 2
+
         for category_idx, category in enumerate(category_names):
             # Filter users in this category
             category_users = test_users[test_users[demographic_attr] == category]
 
             if len(category_users) == 0:
                 continue
+
+            # Store for phase 2
+            user_data_by_category[category_idx] = {
+                'category': category,
+                'users': category_users,
+                'prompts': [],
+                'true_labels_local': []
+            }
+
+            # Process all users: baseline only (no hooks registered)
+            for idx, user_profile in category_users.iterrows():
+                prompt = create_prompt(
+                    user_profile, question,
+                    exclude_attribute=None,  # Include all demographics for prediction
+                    answer_options=answer_options,
+                    answer=None,
+                    prompt_style=prompt_style
+                )
+
+                # Store prompt and label for phase 2
+                user_data_by_category[category_idx]['prompts'].append(prompt)
+                user_data_by_category[category_idx]['true_labels_local'].append(user_profile[question])
+
+                # Baseline prediction (NO intervention hooks active)
+                baseline_pred = predict_from_logits_multitoken(
+                    model, tokenizer, prompt, answer_options, device,
+                    use_intervention=False
+                )
+                baseline_predictions.append(baseline_pred)
+                true_labels.append(user_profile[question])
+
+                # Update progress bar
+                sample_pbar.update(1)
+
+        # Reset progress bar for phase 2
+        sample_pbar.close()
+        sample_pbar = tqdm(total=total_samples, desc=f"      Intervention phase", leave=False)
+
+        # PHASE 2: Collect intervention predictions (hooks once per category)
+        for category_idx in sorted(user_data_by_category.keys()):
+            category_data = user_data_by_category[category_idx]
 
             # Create class-specific intervention weights for this category
             category_weights = select_class_specific_weights(intervention_weights, category_idx)
@@ -1880,8 +1924,6 @@ def evaluate_intervention_on_fold(
             engine = EngineClass(model, category_weights, device)
 
             # Always maximize - select_class_specific_weights already orients coefficients correctly
-            # For binary: category 0 gets negated coef, category 1 gets original coef
-            # For multiclass: each category gets its own coefficient row
             intervention_direction = 'maximize'
 
             # Config for this category
@@ -1912,22 +1954,7 @@ def evaluate_intervention_on_fold(
                     engine.hooks.append(hook)
 
             # Process all users in this category with same hooks
-            for idx, user_profile in category_users.iterrows():
-                prompt = create_prompt(
-                    user_profile, question,
-                    exclude_attribute=None,  # Include all demographics for prediction
-                    answer_options=answer_options,
-                    answer=None,
-                    prompt_style=prompt_style
-                )
-
-                # Baseline prediction (multi-token with length normalization)
-                baseline_pred = predict_from_logits_multitoken(
-                    model, tokenizer, prompt, answer_options, device,
-                    use_intervention=False
-                )
-                baseline_predictions.append(baseline_pred)
-
+            for prompt in category_data['prompts']:
                 # Intervention prediction (reuse hooks for all samples in this category!)
                 intervention_pred = predict_from_logits_multitoken(
                     model, tokenizer, prompt, answer_options, device,
@@ -1937,8 +1964,6 @@ def evaluate_intervention_on_fold(
                     hooks_already_setup=True  # Hooks are already set up!
                 )
                 intervention_predictions.append(intervention_pred)
-
-                true_labels.append(user_profile[question])
 
                 # Update progress bar
                 sample_pbar.update(1)
