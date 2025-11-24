@@ -1438,60 +1438,76 @@ def predict_from_logits_multitoken(
 
     # Get logits with or without intervention
     if use_intervention and intervention_engine is not None:
-        # For intervention, we need to process each sequence separately
-        # because the intervention engine expects single prompts
-        # This is still faster than per-token processing
-        option_scores = []
+        # Use batched intervention for maximum performance!
+        # Prepare batched inputs with padding
+        batch_full_input_ids = []
+        for option_str, option_tokens in option_token_lists:
+            full_sequence = prompt_tokens + option_tokens
+            batch_full_input_ids.append(full_sequence)
+
+        # Pad sequences
+        max_len_full = max(len(seq) for seq in batch_full_input_ids)
+        padded_full_input_ids = []
+        attention_masks_full = []
+
+        for seq in batch_full_input_ids:
+            padding_length = max_len_full - len(seq)
+            padded_seq = [tokenizer.pad_token_id] * padding_length + seq
+            mask = [0] * padding_length + [1] * len(seq)
+            padded_full_input_ids.append(padded_seq)
+            attention_masks_full.append(mask)
+
+        # Convert to tensors
+        input_ids_full_tensor = torch.tensor(padded_full_input_ids, dtype=torch.long).to(device)
+        attention_mask_full_tensor = torch.tensor(attention_masks_full, dtype=torch.long).to(device)
+
+        # Set up intervention hooks once
+        intervention_engine._clear_hooks()
 
         # Determine if we're using attention or MLP engine
         is_attention = isinstance(intervention_engine, CircuitInterventionEngine)
 
+        if is_attention:
+            top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_heads]
+            for (layer, head), (ridge_coef, intercept, feature_std) in top_k_items:
+                hook = intervention_engine._create_steering_hook(
+                    layer, head, ridge_coef, feature_std, intervention_config
+                )
+                intervention_engine.hooks.append(hook)
+        else:
+            top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_layers]
+            for layer_idx, (ridge_coef, intercept, feature_std) in top_k_items:
+                hook = intervention_engine._create_steering_hook(
+                    layer_idx, ridge_coef, feature_std, intervention_config
+                )
+                intervention_engine.hooks.append(hook)
+
+        # Single batched forward pass with intervention (FAST!)
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids_full_tensor, attention_mask=attention_mask_full_tensor)
+            logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+
+        # Clear hooks
+        intervention_engine._clear_hooks()
+
+        # Extract log-probs for each option using teacher forcing
+        option_scores = []
+
         for idx, (option_str, option_tokens) in enumerate(option_token_lists):
-            # Reconstruct the full prompt + answer text
-            full_text = prompt + tokenizer.decode(option_tokens, skip_special_tokens=False)
-
-            # Get logits with intervention
-            with torch.no_grad():
-                # Use intervention on full sequence
-                inputs = tokenizer(full_text, return_tensors="pt", truncation=True, max_length=512)
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-
-                # Set up intervention hooks based on engine type
-                intervention_engine._clear_hooks()
-
-                if is_attention:
-                    # Attention heads: key is (layer, head)
-                    top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_heads]
-                    for (layer, head), (ridge_coef, intercept, feature_std) in top_k_items:
-                        hook = intervention_engine._create_steering_hook(
-                            layer, head, ridge_coef, feature_std, intervention_config
-                        )
-                        intervention_engine.hooks.append(hook)
-                else:
-                    # MLP layers: key is layer_idx
-                    top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_layers]
-                    for layer_idx, (ridge_coef, intercept, feature_std) in top_k_items:
-                        hook = intervention_engine._create_steering_hook(
-                            layer_idx, ridge_coef, feature_std, intervention_config
-                        )
-                        intervention_engine.hooks.append(hook)
-
-                # Forward pass with intervention
-                outputs = model(**inputs)
-                logits = outputs.logits[0]  # (seq_len, vocab_size)
-
-                # Clear hooks
-                intervention_engine._clear_hooks()
-
-            # Extract log-probs for each token in the answer
             log_prob = 0.0
+            seq_logits = logits[idx]  # (seq_len, vocab_size)
             prompt_len = len(prompt_tokens)
 
             for i, token_id in enumerate(option_tokens):
-                # Position in the full sequence where this token's probability is predicted
+                # Position where this token's probability is predicted
                 pos = prompt_len + i - 1
-                if pos >= 0 and pos < len(logits):
-                    token_logits = logits[pos]
+
+                # Handle padding offset
+                padding_length = max_len_full - len(batch_full_input_ids[idx])
+                pos_with_padding = padding_length + pos
+
+                if pos_with_padding >= 0 and pos_with_padding < len(seq_logits):
+                    token_logits = seq_logits[pos_with_padding]
                     log_probs = torch.log_softmax(token_logits, dim=-1)
                     log_prob += log_probs[token_id].item()
 

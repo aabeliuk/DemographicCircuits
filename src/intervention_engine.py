@@ -105,6 +105,62 @@ class CircuitInterventionEngine:
 
         return logits
 
+    def intervene_activation_steering_logits_batched(
+        self,
+        prompts: List[str],
+        tokenizer: AutoTokenizer,
+        config: InterventionConfig
+    ) -> torch.Tensor:
+        """
+        Steer model and return LOGITS for multiple prompts in a single batched forward pass.
+
+        This is significantly faster than calling intervene_activation_steering_logits()
+        multiple times, as hooks are set up once and all prompts are processed together.
+
+        Args:
+            prompts: List of input prompts
+            tokenizer: Tokenizer
+            config: Intervention configuration
+
+        Returns:
+            Logits tensor: (batch_size, vocab_size) for the last token of each prompt
+        """
+        if len(prompts) == 0:
+            return torch.empty(0, self.model.config.vocab_size).to(self.device)
+
+        # Get top-k heads to intervene on
+        top_k_heads = list(self.intervention_weights.items())[:config.top_k_heads]
+
+        # Prepare intervention hooks (set up once for all prompts)
+        self._clear_hooks()
+
+        for (layer, head), (ridge_coef, intercept, feature_std) in top_k_heads:
+            hook = self._create_steering_hook(
+                layer, head, ridge_coef, feature_std, config
+            )
+            self.hooks.append(hook)
+
+        # Tokenize and batch all prompts with padding
+        inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512
+        ).to(self.device)
+
+        # Single batched forward pass with intervention
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            # Extract logits for the last non-padded token of each sequence
+            # For left-padded sequences, last token is always at position -1
+            logits = outputs.logits[:, -1, :]  # (batch_size, vocab_size)
+
+        # Clean up hooks
+        self._clear_hooks()
+
+        return logits
+
     def intervene_activation_steering(
         self,
         prompt: str,
