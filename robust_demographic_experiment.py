@@ -1376,8 +1376,9 @@ def predict_from_logits_multitoken(
     """
     Get prediction using proper multi-token sequence probability with length normalization.
 
-    For each answer option, computes the log-probability of the full token sequence
-    autoregressively, then normalizes by sequence length to avoid bias toward short answers.
+    Uses batched teacher forcing for efficient parallel computation of all answer options.
+    Instead of processing each token autoregressively, we provide the full sequence and
+    extract log-probabilities for each token position in a single forward pass.
 
     Args:
         model: The language model
@@ -1392,55 +1393,149 @@ def predict_from_logits_multitoken(
     Returns:
         Predicted answer option (string)
     """
-    best_score = float('-inf')
-    best_option = None
+    # Tokenize prompt once
+    prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
 
-    for option in answer_options:
-        option_str = str(option)
-        # Tokenize option with space prefix (matches training data format)
-        option_tokens = tokenizer.encode(f" {option_str}", add_special_tokens=False)
+    # Tokenize all answer options
+    option_strs = [str(option) for option in answer_options]
+    option_token_lists = []
+    for option_str in option_strs:
+        # Add space prefix to match training data format
+        tokens = tokenizer.encode(f" {option_str}", add_special_tokens=False)
+        if len(tokens) > 0:
+            option_token_lists.append((option_str, tokens))
 
-        if len(option_tokens) == 0:
-            continue
+    if len(option_token_lists) == 0:
+        return answer_options[0]
 
-        # Compute log-probability of sequence autoregressively
-        log_prob = 0.0
-        current_prompt = prompt
+    # Prepare batched inputs: prompt + full answer sequence for each option
+    batch_input_ids = []
+    batch_option_lengths = []
 
-        for token_id in option_tokens:
-            # Get logits for current prompt
-            if use_intervention and intervention_engine is not None:
-                # Use intervention engine (applies intervention during forward pass)
-                current_logits = intervention_engine.intervene_activation_steering_logits(
-                    current_prompt, tokenizer, intervention_config
-                )
-            else:
-                # Standard forward pass
-                inputs = tokenizer(current_prompt, return_tensors="pt", truncation=True, max_length=512)
+    for option_str, option_tokens in option_token_lists:
+        # Concatenate prompt tokens + answer tokens
+        full_sequence = prompt_tokens + option_tokens
+        batch_input_ids.append(full_sequence)
+        batch_option_lengths.append(len(option_tokens))
+
+    # Pad sequences to same length
+    max_len = max(len(seq) for seq in batch_input_ids)
+    padded_input_ids = []
+    attention_masks = []
+
+    for seq in batch_input_ids:
+        padding_length = max_len - len(seq)
+        # Pad on the left (standard for causal LM)
+        padded_seq = [tokenizer.pad_token_id] * padding_length + seq
+        mask = [0] * padding_length + [1] * len(seq)
+
+        padded_input_ids.append(padded_seq)
+        attention_masks.append(mask)
+
+    # Convert to tensors
+    input_ids_tensor = torch.tensor(padded_input_ids, dtype=torch.long).to(device)
+    attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long).to(device)
+
+    # Get logits with or without intervention
+    if use_intervention and intervention_engine is not None:
+        # For intervention, we need to process each sequence separately
+        # because the intervention engine expects single prompts
+        # This is still faster than per-token processing
+        option_scores = []
+
+        # Determine if we're using attention or MLP engine
+        is_attention = isinstance(intervention_engine, CircuitInterventionEngine)
+
+        for idx, (option_str, option_tokens) in enumerate(option_token_lists):
+            # Reconstruct the full prompt + answer text
+            full_text = prompt + tokenizer.decode(option_tokens, skip_special_tokens=False)
+
+            # Get logits with intervention
+            with torch.no_grad():
+                # Use intervention on full sequence
+                inputs = tokenizer(full_text, return_tensors="pt", truncation=True, max_length=512)
                 inputs = {k: v.to(device) for k, v in inputs.items()}
-                with torch.no_grad():
-                    outputs = model(**inputs)
-                    current_logits = outputs.logits[:, -1, :]
 
-            # Convert logits to log-probabilities
-            log_probs = torch.log_softmax(current_logits, dim=-1)
+                # Set up intervention hooks based on engine type
+                intervention_engine._clear_hooks()
 
-            # Add log-probability of this specific token
-            log_prob += log_probs[0, token_id].item()
+                if is_attention:
+                    # Attention heads: key is (layer, head)
+                    top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_heads]
+                    for (layer, head), (ridge_coef, intercept, feature_std) in top_k_items:
+                        hook = intervention_engine._create_steering_hook(
+                            layer, head, ridge_coef, feature_std, intervention_config
+                        )
+                        intervention_engine.hooks.append(hook)
+                else:
+                    # MLP layers: key is layer_idx
+                    top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_layers]
+                    for layer_idx, (ridge_coef, intercept, feature_std) in top_k_items:
+                        hook = intervention_engine._create_steering_hook(
+                            layer_idx, ridge_coef, feature_std, intervention_config
+                        )
+                        intervention_engine.hooks.append(hook)
 
-            # Append token to prompt for next iteration (autoregressive)
-            token_text = tokenizer.decode([token_id], skip_special_tokens=True)
-            current_prompt += token_text
+                # Forward pass with intervention
+                outputs = model(**inputs)
+                logits = outputs.logits[0]  # (seq_len, vocab_size)
 
-        # Length-normalize: divide by number of tokens
-        # This prevents bias toward shorter sequences
-        normalized_score = log_prob / len(option_tokens)
+                # Clear hooks
+                intervention_engine._clear_hooks()
 
-        if normalized_score > best_score:
-            best_score = normalized_score
-            best_option = option_str
+            # Extract log-probs for each token in the answer
+            log_prob = 0.0
+            prompt_len = len(prompt_tokens)
 
-    return best_option if best_option is not None else answer_options[0]
+            for i, token_id in enumerate(option_tokens):
+                # Position in the full sequence where this token's probability is predicted
+                pos = prompt_len + i - 1
+                if pos >= 0 and pos < len(logits):
+                    token_logits = logits[pos]
+                    log_probs = torch.log_softmax(token_logits, dim=-1)
+                    log_prob += log_probs[token_id].item()
+
+            # Length-normalize
+            normalized_score = log_prob / len(option_tokens)
+            option_scores.append((normalized_score, option_str))
+
+    else:
+        # Baseline: single batched forward pass (MUCH faster!)
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids_tensor, attention_mask=attention_mask_tensor)
+            logits = outputs.logits  # (batch_size, seq_len, vocab_size)
+
+        # Compute log-probabilities for each option
+        option_scores = []
+
+        for idx, (option_str, option_tokens) in enumerate(option_token_lists):
+            log_prob = 0.0
+
+            # For each token in the answer, get its log-probability
+            seq_logits = logits[idx]  # (seq_len, vocab_size)
+            prompt_len = len(prompt_tokens)
+
+            for i, token_id in enumerate(option_tokens):
+                # Position where this token's probability is predicted
+                # We need the logits from the PREVIOUS position
+                pos = prompt_len + i - 1
+
+                # Handle padding offset
+                padding_length = max_len - len(batch_input_ids[idx])
+                pos_with_padding = padding_length + pos
+
+                if pos_with_padding >= 0 and pos_with_padding < len(seq_logits):
+                    token_logits = seq_logits[pos_with_padding]
+                    log_probs = torch.log_softmax(token_logits, dim=-1)
+                    log_prob += log_probs[token_id].item()
+
+            # Length-normalize
+            normalized_score = log_prob / len(option_tokens)
+            option_scores.append((normalized_score, option_str))
+
+    # Select best option
+    best_score, best_option = max(option_scores, key=lambda x: x[0])
+    return best_option
 
 
 def select_class_specific_weights(
