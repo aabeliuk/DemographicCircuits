@@ -1371,7 +1371,8 @@ def predict_from_logits_multitoken(
     device: str,
     use_intervention: bool = False,
     intervention_engine = None,
-    intervention_config = None
+    intervention_config = None,
+    hooks_already_setup: bool = False
 ) -> str:
     """
     Get prediction using proper multi-token sequence probability with length normalization.
@@ -1389,12 +1390,14 @@ def predict_from_logits_multitoken(
         use_intervention: Whether to apply intervention during generation
         intervention_engine: Intervention engine (required if use_intervention=True)
         intervention_config: Intervention config (required if use_intervention=True)
+        hooks_already_setup: If True, assumes hooks are already registered (optimization)
 
     Returns:
         Predicted answer option (string)
     """
     # Tokenize prompt once
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
+    prompt_len = len(prompt_tokens)  # Precompute length
 
     # Tokenize all answer options
     option_strs = [str(option) for option in answer_options]
@@ -1441,55 +1444,64 @@ def predict_from_logits_multitoken(
         # Use batched intervention for maximum performance!
         # Reuse the already-prepared tensors from above (no duplicate work!)
 
-        # Set up intervention hooks once
-        intervention_engine._clear_hooks()
+        # Set up intervention hooks (unless already setup for batch processing)
+        if not hooks_already_setup:
+            intervention_engine._clear_hooks()
 
-        # Determine if we're using attention or MLP engine
-        is_attention = isinstance(intervention_engine, CircuitInterventionEngine)
+            # Determine if we're using attention or MLP engine
+            is_attention = isinstance(intervention_engine, CircuitInterventionEngine)
 
-        if is_attention:
-            top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_heads]
-            for (layer, head), (ridge_coef, intercept, feature_std) in top_k_items:
-                hook = intervention_engine._create_steering_hook(
-                    layer, head, ridge_coef, feature_std, intervention_config
-                )
-                intervention_engine.hooks.append(hook)
-        else:
-            top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_layers]
-            for layer_idx, (ridge_coef, intercept, feature_std) in top_k_items:
-                hook = intervention_engine._create_steering_hook(
-                    layer_idx, ridge_coef, feature_std, intervention_config
-                )
-                intervention_engine.hooks.append(hook)
+            if is_attention:
+                top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_heads]
+                for (layer, head), (ridge_coef, intercept, feature_std) in top_k_items:
+                    hook = intervention_engine._create_steering_hook(
+                        layer, head, ridge_coef, feature_std, intervention_config
+                    )
+                    intervention_engine.hooks.append(hook)
+            else:
+                top_k_items = list(intervention_engine.intervention_weights.items())[:intervention_config.top_k_layers]
+                for layer_idx, (ridge_coef, intercept, feature_std) in top_k_items:
+                    hook = intervention_engine._create_steering_hook(
+                        layer_idx, ridge_coef, feature_std, intervention_config
+                    )
+                    intervention_engine.hooks.append(hook)
 
         # Single batched forward pass with intervention (FAST!)
         with torch.no_grad():
             outputs = model(input_ids=input_ids_tensor, attention_mask=attention_mask_tensor)
             logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 
-        # Clear hooks
-        intervention_engine._clear_hooks()
+        # Clear hooks (unless caller wants to reuse them)
+        if not hooks_already_setup:
+            intervention_engine._clear_hooks()
 
         # Extract log-probs for each option using teacher forcing
         option_scores = []
 
         for idx, (option_str, option_tokens) in enumerate(option_token_lists):
-            log_prob = 0.0
             seq_logits = logits[idx]  # (seq_len, vocab_size)
-            prompt_len = len(prompt_tokens)
 
+            # Precompute padding offset for this sequence (constant per option)
+            padding_length = max_len - len(batch_input_ids[idx])
+
+            # Compute log_softmax ONCE for entire sequence (not per token!)
+            seq_log_probs = torch.log_softmax(seq_logits, dim=-1)  # (seq_len, vocab_size)
+
+            # Vectorized extraction: collect all positions and token IDs
+            positions = []
+            token_ids = []
             for i, token_id in enumerate(option_tokens):
-                # Position where this token's probability is predicted
                 pos = prompt_len + i - 1
-
-                # Handle padding offset
-                padding_length = max_len - len(batch_input_ids[idx])
                 pos_with_padding = padding_length + pos
+                if pos_with_padding >= 0 and pos_with_padding < len(seq_log_probs):
+                    positions.append(pos_with_padding)
+                    token_ids.append(token_id)
 
-                if pos_with_padding >= 0 and pos_with_padding < len(seq_logits):
-                    token_logits = seq_logits[pos_with_padding]
-                    log_probs = torch.log_softmax(token_logits, dim=-1)
-                    log_prob += log_probs[token_id].item()
+            # Extract all log-probs at once and sum on GPU
+            if positions:
+                log_prob = seq_log_probs[positions, token_ids].sum().item()  # Single GPU->CPU transfer!
+            else:
+                log_prob = 0.0
 
             # Length-normalize
             normalized_score = log_prob / len(option_tokens)
@@ -1505,25 +1517,30 @@ def predict_from_logits_multitoken(
         option_scores = []
 
         for idx, (option_str, option_tokens) in enumerate(option_token_lists):
-            log_prob = 0.0
-
             # For each token in the answer, get its log-probability
             seq_logits = logits[idx]  # (seq_len, vocab_size)
-            prompt_len = len(prompt_tokens)
 
+            # Precompute padding offset for this sequence (constant per option)
+            padding_length = max_len - len(batch_input_ids[idx])
+
+            # Compute log_softmax ONCE for entire sequence (not per token!)
+            seq_log_probs = torch.log_softmax(seq_logits, dim=-1)  # (seq_len, vocab_size)
+
+            # Vectorized extraction: collect all positions and token IDs
+            positions = []
+            token_ids = []
             for i, token_id in enumerate(option_tokens):
-                # Position where this token's probability is predicted
-                # We need the logits from the PREVIOUS position
                 pos = prompt_len + i - 1
-
-                # Handle padding offset
-                padding_length = max_len - len(batch_input_ids[idx])
                 pos_with_padding = padding_length + pos
+                if pos_with_padding >= 0 and pos_with_padding < len(seq_log_probs):
+                    positions.append(pos_with_padding)
+                    token_ids.append(token_id)
 
-                if pos_with_padding >= 0 and pos_with_padding < len(seq_logits):
-                    token_logits = seq_logits[pos_with_padding]
-                    log_probs = torch.log_softmax(token_logits, dim=-1)
-                    log_prob += log_probs[token_id].item()
+            # Extract all log-probs at once and sum on GPU
+            if positions:
+                log_prob = seq_log_probs[positions, token_ids].sum().item()  # Single GPU->CPU transfer!
+            else:
+                log_prob = 0.0
 
             # Length-normalize
             normalized_score = log_prob / len(option_tokens)
@@ -1875,7 +1892,26 @@ def evaluate_intervention_on_fold(
             }
             config = ConfigClass(**config_kwargs)
 
-            # Process all users in this category
+            # Set up intervention hooks ONCE for this entire category (major optimization!)
+            engine._clear_hooks()
+            is_attention = isinstance(engine, CircuitInterventionEngine)
+
+            if is_attention:
+                top_k_items = list(category_weights.items())[:config.top_k_heads]
+                for (layer, head), (ridge_coef, intercept, feature_std) in top_k_items:
+                    hook = engine._create_steering_hook(
+                        layer, head, ridge_coef, feature_std, config
+                    )
+                    engine.hooks.append(hook)
+            else:
+                top_k_items = list(category_weights.items())[:config.top_k_layers]
+                for layer_idx, (ridge_coef, intercept, feature_std) in top_k_items:
+                    hook = engine._create_steering_hook(
+                        layer_idx, ridge_coef, feature_std, config
+                    )
+                    engine.hooks.append(hook)
+
+            # Process all users in this category with same hooks
             for idx, user_profile in category_users.iterrows():
                 prompt = create_prompt(
                     user_profile, question,
@@ -1892,12 +1928,13 @@ def evaluate_intervention_on_fold(
                 )
                 baseline_predictions.append(baseline_pred)
 
-                # Intervention prediction (multi-token with intervention applied)
+                # Intervention prediction (reuse hooks for all samples in this category!)
                 intervention_pred = predict_from_logits_multitoken(
                     model, tokenizer, prompt, answer_options, device,
                     use_intervention=True,
                     intervention_engine=engine,
-                    intervention_config=config
+                    intervention_config=config,
+                    hooks_already_setup=True  # Hooks are already set up!
                 )
                 intervention_predictions.append(intervention_pred)
 
@@ -1905,6 +1942,9 @@ def evaluate_intervention_on_fold(
 
                 # Update progress bar
                 sample_pbar.update(1)
+
+            # Clear hooks after processing all users in this category
+            engine._clear_hooks()
 
         # Close the progress bar
         sample_pbar.close()
