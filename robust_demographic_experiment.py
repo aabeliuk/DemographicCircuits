@@ -1439,27 +1439,7 @@ def predict_from_logits_multitoken(
     # Get logits with or without intervention
     if use_intervention and intervention_engine is not None:
         # Use batched intervention for maximum performance!
-        # Prepare batched inputs with padding
-        batch_full_input_ids = []
-        for option_str, option_tokens in option_token_lists:
-            full_sequence = prompt_tokens + option_tokens
-            batch_full_input_ids.append(full_sequence)
-
-        # Pad sequences
-        max_len_full = max(len(seq) for seq in batch_full_input_ids)
-        padded_full_input_ids = []
-        attention_masks_full = []
-
-        for seq in batch_full_input_ids:
-            padding_length = max_len_full - len(seq)
-            padded_seq = [tokenizer.pad_token_id] * padding_length + seq
-            mask = [0] * padding_length + [1] * len(seq)
-            padded_full_input_ids.append(padded_seq)
-            attention_masks_full.append(mask)
-
-        # Convert to tensors
-        input_ids_full_tensor = torch.tensor(padded_full_input_ids, dtype=torch.long).to(device)
-        attention_mask_full_tensor = torch.tensor(attention_masks_full, dtype=torch.long).to(device)
+        # Reuse the already-prepared tensors from above (no duplicate work!)
 
         # Set up intervention hooks once
         intervention_engine._clear_hooks()
@@ -1484,7 +1464,7 @@ def predict_from_logits_multitoken(
 
         # Single batched forward pass with intervention (FAST!)
         with torch.no_grad():
-            outputs = model(input_ids=input_ids_full_tensor, attention_mask=attention_mask_full_tensor)
+            outputs = model(input_ids=input_ids_tensor, attention_mask=attention_mask_tensor)
             logits = outputs.logits  # (batch_size, seq_len, vocab_size)
 
         # Clear hooks
@@ -1503,7 +1483,7 @@ def predict_from_logits_multitoken(
                 pos = prompt_len + i - 1
 
                 # Handle padding offset
-                padding_length = max_len_full - len(batch_full_input_ids[idx])
+                padding_length = max_len - len(batch_input_ids[idx])
                 pos_with_padding = padding_length + pos
 
                 if pos_with_padding >= 0 and pos_with_padding < len(seq_logits):
