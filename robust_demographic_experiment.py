@@ -1728,7 +1728,7 @@ def evaluate_intervention_on_fold(
 
     test_results = {}
 
-    for question in test_questions:
+    for question in tqdm(test_questions, desc="    Evaluating questions", leave=False):
         # Get test users
         test_users = df[df[question].notna() & df[demographic_attr].notna()].copy()
 
@@ -1752,6 +1752,10 @@ def evaluate_intervention_on_fold(
         baseline_predictions = []
         intervention_predictions = []
         true_labels = []
+
+        # Create progress bar for samples
+        total_samples = len(test_users)
+        sample_pbar = tqdm(total=total_samples, desc=f"      Processing samples", leave=False)
 
         # Group users by category for efficient batch processing
         for category_idx, category in enumerate(category_names):
@@ -1807,6 +1811,12 @@ def evaluate_intervention_on_fold(
                 intervention_predictions.append(intervention_pred)
 
                 true_labels.append(user_profile[question])
+
+                # Update progress bar
+                sample_pbar.update(1)
+
+        # Close the progress bar
+        sample_pbar.close()
 
         # Print response distributions
         print(f"\n      Response Distributions:")
