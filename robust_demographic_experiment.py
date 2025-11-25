@@ -1846,11 +1846,21 @@ def evaluate_intervention_on_fold(
         if eval_sample_size and len(test_users) > eval_sample_size:
             test_users = test_users.sample(n=eval_sample_size, random_state=42)
 
-        # Get answer options
-        answer_options = sorted(test_users[question].dropna().unique().tolist())
+        # Get answer options in proper ordinal order (not alphabetical!)
+        if question in ANES_2024_VARIABLES and 'values' in ANES_2024_VARIABLES[question]:
+            # Use ANES ordinal order (preserves 1, 2, 3, 4... ranking)
+            anes_values = ANES_2024_VARIABLES[question]['values']
+            answer_options = [val for val in anes_values.values() if val in test_users[question].values]
+        else:
+            # Fall back to alphabetical for non-ordinal questions
+            answer_options = sorted(test_users[question].dropna().unique().tolist())
 
         if len(answer_options) == 0:
             continue
+
+        # Create label-to-rank mapping for Kendall's tau (ordinal correlation)
+        # Maps string labels to numeric ranks: 0, 1, 2, 3...
+        label_to_rank = {label: rank for rank, label in enumerate(answer_options)}
 
         # Print sample size for this question
         q_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
@@ -2003,13 +2013,32 @@ def evaluate_intervention_on_fold(
         # Calculate Kendall's tau for ordinal variables
         # This measures how well predictions preserve the ordinal ranking
         try:
-            baseline_kendall, baseline_kendall_p = kendalltau(true_labels, baseline_predictions)
-            intervention_kendall, intervention_kendall_p = kendalltau(true_labels, intervention_predictions)
+            # Convert string labels to numeric ranks for proper ordinal correlation
+            true_ranks = [label_to_rank.get(label, -1) for label in true_labels]
+            baseline_ranks = [label_to_rank.get(label, -1) for label in baseline_predictions]
+            intervention_ranks = [label_to_rank.get(label, -1) for label in intervention_predictions]
+
+            # Filter valid pairs (exclude any -1 ranks from missing labels)
+            baseline_valid_pairs = [(t, b) for t, b in zip(true_ranks, baseline_ranks) if t != -1 and b != -1]
+            intervention_valid_pairs = [(t, i) for t, i in zip(true_ranks, intervention_ranks) if t != -1 and i != -1]
+
+            # Compute Kendall's tau on numeric ranks
+            if len(baseline_valid_pairs) > 1:
+                true_b, pred_b = zip(*baseline_valid_pairs)
+                baseline_kendall, baseline_kendall_p = kendalltau(true_b, pred_b)
+            else:
+                baseline_kendall = baseline_kendall_p = None
+
+            if len(intervention_valid_pairs) > 1:
+                true_i, pred_i = zip(*intervention_valid_pairs)
+                intervention_kendall, intervention_kendall_p = kendalltau(true_i, pred_i)
+            else:
+                intervention_kendall = intervention_kendall_p = None
 
             # Handle NaN values (occurs when all predictions are identical)
-            if np.isnan(baseline_kendall):
+            if baseline_kendall is not None and np.isnan(baseline_kendall):
                 baseline_kendall = baseline_kendall_p = None
-            if np.isnan(intervention_kendall):
+            if intervention_kendall is not None and np.isnan(intervention_kendall):
                 intervention_kendall = intervention_kendall_p = None
 
             # Calculate improvement only if both are valid
@@ -2138,11 +2167,21 @@ def evaluate_intersectional_intervention_on_fold(
         if eval_sample_size and len(test_users) > eval_sample_size:
             test_users = test_users.sample(n=eval_sample_size, random_state=42)
 
-        # Get answer options
-        answer_options = sorted(test_users[question].dropna().unique().tolist())
+        # Get answer options in proper ordinal order (not alphabetical!)
+        if question in ANES_2024_VARIABLES and 'values' in ANES_2024_VARIABLES[question]:
+            # Use ANES ordinal order (preserves 1, 2, 3, 4... ranking)
+            anes_values = ANES_2024_VARIABLES[question]['values']
+            answer_options = [val for val in anes_values.values() if val in test_users[question].values]
+        else:
+            # Fall back to alphabetical for non-ordinal questions
+            answer_options = sorted(test_users[question].dropna().unique().tolist())
 
         if len(answer_options) == 0:
             continue
+
+        # Create label-to-rank mapping for Kendall's tau (ordinal correlation)
+        # Maps string labels to numeric ranks: 0, 1, 2, 3...
+        label_to_rank = {label: rank for rank, label in enumerate(answer_options)}
 
         # Print sample size for this question
         q_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
