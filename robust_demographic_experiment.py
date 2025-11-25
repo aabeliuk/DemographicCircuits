@@ -1820,7 +1820,10 @@ def evaluate_intervention_on_fold(
     probe_type: str,
     intervention_strength: float,
     eval_sample_size: int,
-    prompt_style: str = "original"
+    prompt_style: str = "original",
+    output_dir: Path = None,
+    run_id: str = None,
+    top_k_heads: int = None
 ) -> Dict:
     """Evaluate intervention on test fold"""
 
@@ -2101,9 +2104,12 @@ def evaluate_intervention_on_fold(
         predictions_df['changed'] = predictions_df['baseline_prediction'] != predictions_df['intervention_prediction']
 
         # Save to CSV (one per question)
-        csv_filename = f"predictions_{demographic_attr}_{question}.csv"
-        predictions_df.to_csv(csv_filename, index=False)
-        print(f"      Saved predictions to {csv_filename}")
+        if output_dir is not None and run_id is not None and top_k_heads is not None:
+            # Construct filename matching intervention results pattern
+            csv_filename = f"{demographic_attr}_{probe_type}_k{top_k_heads}_s{intervention_strength}_{run_id}_{question}_predictions.csv"
+            csv_path = output_dir / csv_filename
+            predictions_df.to_csv(csv_path, index=False)
+            print(f"      Saved predictions to {csv_path}")
 
         test_results[question] = {
             'baseline_accuracy': baseline_acc,
@@ -2153,7 +2159,9 @@ def evaluate_intersectional_intervention_on_fold(
     intervention_strength: float,
     eval_sample_size: int,
     top_k_heads: int,
-    prompt_style: str = "original"
+    prompt_style: str = "original",
+    output_dir: Path = None,
+    run_id: str = None
 ) -> Dict:
     """
     Evaluate intersectional intervention combining multiple demographics simultaneously.
@@ -2415,11 +2423,13 @@ def evaluate_intersectional_intervention_on_fold(
         predictions_df['changed'] = predictions_df['baseline_prediction'] != predictions_df['intervention_prediction']
 
         # Save to CSV (one per question)
-        # Create filename with all demographic attributes
-        demo_str = '_'.join(demographic_attrs)
-        csv_filename = f"predictions_intersectional_{demo_str}_{question}.csv"
-        predictions_df.to_csv(csv_filename, index=False)
-        print(f"      Saved predictions to {csv_filename}")
+        if output_dir is not None and run_id is not None:
+            # Create filename matching intersectional results pattern
+            intersect_name = '_'.join(demographic_attrs)
+            csv_filename = f"intersectional_{intersect_name}_{probe_type}_k{top_k_heads}_s{intervention_strength}_{run_id}_{question}_predictions.csv"
+            csv_path = output_dir / csv_filename
+            predictions_df.to_csv(csv_path, index=False)
+            print(f"      Saved predictions to {csv_path}")
 
         # Count unique demographic combinations tested
         unique_combos = len(set(demographic_combinations))
@@ -2638,7 +2648,9 @@ def run_intervention_phase(args):
                 args.intervention_strength,
                 args.eval_sample_size,
                 args.top_k_heads,
-                args.prompt_style
+                args.prompt_style,
+                results_dir,
+                args.run_id
             )
 
             # Aggregate fold results (same as single-demographic case)
@@ -3186,7 +3198,10 @@ def run_intervention_phase(args):
                 model, tokenizer, df, test_questions, demographic,
                 category_names, intervention_weights, args.device,
                 args.probe_type, args.intervention_strength, args.eval_sample_size,
-                args.prompt_style
+                args.prompt_style,
+                results_dir,
+                args.run_id,
+                args.top_k_heads
             )
 
             # Print fold results
