@@ -1876,6 +1876,9 @@ def evaluate_intervention_on_fold(
         intervention_predictions = []
         true_labels = []
 
+        # Track detailed per-user information for CSV export
+        user_details = []  # List of dicts with user info
+
         # Create progress bar for samples
         total_samples = len(test_users)
         sample_pbar = tqdm(total=total_samples, desc=f"      Processing samples", leave=False)
@@ -1921,6 +1924,14 @@ def evaluate_intervention_on_fold(
                 baseline_predictions.append(baseline_pred)
                 true_labels.append(user_profile[question])
 
+                # Track user details for CSV export
+                user_details.append({
+                    'user_id': idx,
+                    'demographic_value': category,
+                    'true_label': user_profile[question],
+                    'baseline_prediction': baseline_pred
+                })
+
                 # Update progress bar
                 sample_pbar.update(1)
 
@@ -1929,6 +1940,7 @@ def evaluate_intervention_on_fold(
         sample_pbar = tqdm(total=total_samples, desc=f"      Intervention phase", leave=False)
 
         # PHASE 2: Collect intervention predictions (hooks once per category)
+        user_idx = 0  # Track position in user_details list
         for category_idx in sorted(user_data_by_category.keys()):
             category_data = user_data_by_category[category_idx]
 
@@ -1979,6 +1991,10 @@ def evaluate_intervention_on_fold(
                     hooks_already_setup=True  # Hooks are already set up!
                 )
                 intervention_predictions.append(intervention_pred)
+
+                # Add intervention prediction to user_details
+                user_details[user_idx]['intervention_prediction'] = intervention_pred
+                user_idx += 1
 
                 # Update progress bar
                 sample_pbar.update(1)
@@ -2074,6 +2090,20 @@ def evaluate_intervention_on_fold(
                     improvements[f'{key}_improvement'] = intervention_advanced[key] - baseline_advanced[key]
             else:
                 improvements[f'{key}_improvement'] = None
+
+        # Create predictions DataFrame for CSV export
+        predictions_df = pd.DataFrame(user_details)
+        predictions_df.insert(0, 'question', question)
+        predictions_df.insert(1, 'question_label', q_label)
+        predictions_df.insert(3, 'demographic', demographic_attr)
+        predictions_df['baseline_correct'] = predictions_df['true_label'] == predictions_df['baseline_prediction']
+        predictions_df['intervention_correct'] = predictions_df['true_label'] == predictions_df['intervention_prediction']
+        predictions_df['changed'] = predictions_df['baseline_prediction'] != predictions_df['intervention_prediction']
+
+        # Save to CSV (one per question)
+        csv_filename = f"predictions_{demographic_attr}_{question}.csv"
+        predictions_df.to_csv(csv_filename, index=False)
+        print(f"      Saved predictions to {csv_filename}")
 
         test_results[question] = {
             'baseline_accuracy': baseline_acc,
@@ -2202,6 +2232,7 @@ def evaluate_intersectional_intervention_on_fold(
         intervention_predictions = []
         true_labels = []
         demographic_combinations = []  # Track demographic profile of each user
+        user_details = []  # List of dicts with user info for CSV export
 
         # Process each user individually (since each has unique demographic combination)
         first_user = True
@@ -2286,6 +2317,18 @@ def evaluate_intersectional_intervention_on_fold(
             demo_combo = tuple(user_profile[demo] for demo in demographic_attrs)
             demographic_combinations.append(demo_combo)
 
+            # Track user details for CSV export
+            user_detail = {
+                'user_id': idx,
+                'true_label': user_profile[question],
+                'baseline_prediction': baseline_pred,
+                'intervention_prediction': intervention_pred
+            }
+            # Add each demographic attribute as a column
+            for demo in demographic_attrs:
+                user_detail[f'demographic_{demo}'] = user_profile[demo]
+            user_details.append(user_detail)
+
         # Print response distributions
         print(f"\n      Response Distributions:")
         true_dist = Counter(true_labels)
@@ -2306,16 +2349,38 @@ def evaluate_intersectional_intervention_on_fold(
         intervention_acc = accuracy_score(true_labels, intervention_predictions)
         improvement = (intervention_acc - baseline_acc) * 100
 
-        # Calculate Kendall's tau
+        # Calculate Kendall's tau for ordinal variables
+        # This measures how well predictions preserve the ordinal ranking
         try:
-            baseline_kendall, baseline_kendall_p = kendalltau(true_labels, baseline_predictions)
-            intervention_kendall, intervention_kendall_p = kendalltau(true_labels, intervention_predictions)
+            # Convert string labels to numeric ranks for proper ordinal correlation
+            true_ranks = [label_to_rank.get(label, -1) for label in true_labels]
+            baseline_ranks = [label_to_rank.get(label, -1) for label in baseline_predictions]
+            intervention_ranks = [label_to_rank.get(label, -1) for label in intervention_predictions]
 
-            if np.isnan(baseline_kendall):
+            # Filter valid pairs (exclude any -1 ranks from missing labels)
+            baseline_valid_pairs = [(t, b) for t, b in zip(true_ranks, baseline_ranks) if t != -1 and b != -1]
+            intervention_valid_pairs = [(t, i) for t, i in zip(true_ranks, intervention_ranks) if t != -1 and i != -1]
+
+            # Compute Kendall's tau on numeric ranks
+            if len(baseline_valid_pairs) > 1:
+                true_b, pred_b = zip(*baseline_valid_pairs)
+                baseline_kendall, baseline_kendall_p = kendalltau(true_b, pred_b)
+            else:
                 baseline_kendall = baseline_kendall_p = None
-            if np.isnan(intervention_kendall):
+
+            if len(intervention_valid_pairs) > 1:
+                true_i, pred_i = zip(*intervention_valid_pairs)
+                intervention_kendall, intervention_kendall_p = kendalltau(true_i, pred_i)
+            else:
                 intervention_kendall = intervention_kendall_p = None
 
+            # Handle NaN values (occurs when all predictions are identical)
+            if baseline_kendall is not None and np.isnan(baseline_kendall):
+                baseline_kendall = baseline_kendall_p = None
+            if intervention_kendall is not None and np.isnan(intervention_kendall):
+                intervention_kendall = intervention_kendall_p = None
+
+            # Calculate improvement only if both are valid
             if baseline_kendall is not None and intervention_kendall is not None:
                 kendall_improvement = intervention_kendall - baseline_kendall
             else:
@@ -2340,6 +2405,21 @@ def evaluate_intersectional_intervention_on_fold(
                     improvements[f'{key}_improvement'] = intervention_advanced[key] - baseline_advanced[key]
             else:
                 improvements[f'{key}_improvement'] = None
+
+        # Create predictions DataFrame for CSV export
+        predictions_df = pd.DataFrame(user_details)
+        predictions_df.insert(0, 'question', question)
+        predictions_df.insert(1, 'question_label', q_label)
+        predictions_df['baseline_correct'] = predictions_df['true_label'] == predictions_df['baseline_prediction']
+        predictions_df['intervention_correct'] = predictions_df['true_label'] == predictions_df['intervention_prediction']
+        predictions_df['changed'] = predictions_df['baseline_prediction'] != predictions_df['intervention_prediction']
+
+        # Save to CSV (one per question)
+        # Create filename with all demographic attributes
+        demo_str = '_'.join(demographic_attrs)
+        csv_filename = f"predictions_intersectional_{demo_str}_{question}.csv"
+        predictions_df.to_csv(csv_filename, index=False)
+        print(f"      Saved predictions to {csv_filename}")
 
         # Count unique demographic combinations tested
         unique_combos = len(set(demographic_combinations))
