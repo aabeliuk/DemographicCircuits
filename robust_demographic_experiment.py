@@ -1851,6 +1851,11 @@ def evaluate_intervention_on_fold(
             # Use ANES ordinal order (preserves 1, 2, 3, 4... ranking)
             anes_values = ANES_2024_VARIABLES[question]['values']
             answer_options = [val for val in anes_values.values() if val in test_users[question].values]
+
+            # Special handling: For Favor/Oppose/Neither questions, put Neither in middle
+            # Neither represents the middle ground between Favor and Oppose
+            if set(answer_options) == {'Favor', 'Oppose', 'Neither'}:
+                answer_options = ['Favor', 'Neither', 'Oppose']  # Correct ordinal order
         else:
             # Fall back to alphabetical for non-ordinal questions
             answer_options = sorted(test_users[question].dropna().unique().tolist())
@@ -2172,6 +2177,11 @@ def evaluate_intersectional_intervention_on_fold(
             # Use ANES ordinal order (preserves 1, 2, 3, 4... ranking)
             anes_values = ANES_2024_VARIABLES[question]['values']
             answer_options = [val for val in anes_values.values() if val in test_users[question].values]
+
+            # Special handling: For Favor/Oppose/Neither questions, put Neither in middle
+            # Neither represents the middle ground between Favor and Oppose
+            if set(answer_options) == {'Favor', 'Oppose', 'Neither'}:
+                answer_options = ['Favor', 'Neither', 'Oppose']  # Correct ordinal order
         else:
             # Fall back to alphabetical for non-ordinal questions
             answer_options = sorted(test_users[question].dropna().unique().tolist())
