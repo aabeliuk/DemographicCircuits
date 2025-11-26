@@ -1,2 +1,4 @@
 /experiment_results
 /paper
+test_mcc_implementation.py
+*.pyc

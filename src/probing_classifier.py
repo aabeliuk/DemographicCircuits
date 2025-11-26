@@ -15,6 +15,7 @@ Key features:
 import numpy as np
 from sklearn.linear_model import Ridge, RidgeClassifier
 from sklearn.model_selection import KFold
+from sklearn.metrics import matthews_corrcoef
 from scipy.stats import spearmanr
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Literal
@@ -30,6 +31,7 @@ class ProbingResult:
     val_score: float
     spearman_r: float
     spearman_p: float
+    mcc_score: float  # Matthews Correlation Coefficient (primary selection metric)
     ridge_coef: np.ndarray
     ridge_intercept: float
     feature_std: float  # Standard deviation of training features
@@ -62,7 +64,7 @@ class AttentionHeadProber:
         num_heads: int,
         head_dim: int,
         alpha: float = 1.0,
-        n_folds: int = 2,
+        n_folds: int = 3,
         task_type: Literal['regression', 'classification'] = 'regression',
         random_state: int = 42
     ):
@@ -89,21 +91,34 @@ class AttentionHeadProber:
         head_features: np.ndarray,
         targets: np.ndarray,
         layer: int,
-        head: int
+        head: int,
+        confounder_features: np.ndarray = None
     ) -> ProbingResult:
         """
         Train and evaluate a linear probe for a single attention head.
+
+        Supports multivariate regression with confounder control:
+        If confounder_features provided, trains Ridge on [head_features | confounders],
+        isolating the unique contribution of this head to predicting the target.
 
         Args:
             head_features: Shape (n_samples, head_dim)
             targets: Shape (n_samples,) - continuous or binary
             layer: Layer index
             head: Head index
+            confounder_features: Optional shape (n_samples, n_confounders)
+                                One-hot encoded demographic confounders
 
         Returns:
             ProbingResult with cross-validation metrics
         """
         n_samples = head_features.shape[0]
+
+        # Concatenate head features with confounders if provided
+        if confounder_features is not None:
+            combined_features = np.hstack([head_features, confounder_features])
+        else:
+            combined_features = head_features
 
         # Choose model based on task type
         if self.task_type == 'regression':
@@ -118,8 +133,8 @@ class AttentionHeadProber:
         val_predictions = np.zeros(n_samples)
         val_indices = []
 
-        for train_idx, val_idx in kf.split(head_features):
-            X_train, X_val = head_features[train_idx], head_features[val_idx]
+        for train_idx, val_idx in kf.split(combined_features):
+            X_train, X_val = combined_features[train_idx], combined_features[val_idx]
             y_train, y_val = targets[train_idx], targets[val_idx]
 
             # Train ridge model
@@ -143,15 +158,27 @@ class AttentionHeadProber:
         # Calculate Spearman correlation on all validation predictions
         spearman_r, spearman_p = spearmanr(targets[val_indices], val_predictions[val_indices])
 
+        # Calculate Matthews Correlation Coefficient (MCC) on validation predictions
+        # MCC is more discriminative for classification and provides better separation between components
+        mcc_score = matthews_corrcoef(targets[val_indices], val_predictions[val_indices])
+
         # Train final model on all data for coefficient extraction
+        # Note: Model is trained on combined features (head + confounders)
+        # but coefficients for head features are still extracted for intervention
         final_model = model_class(alpha=self.alpha, random_state=self.random_state)
-        final_model.fit(head_features, targets)
+        final_model.fit(combined_features, targets)
 
         # Extract coefficients
+        # Important: Only extract coefficients for HEAD FEATURES (not confounders)
+        # These are used for intervention, so we only want head-specific weights
         if hasattr(final_model, 'coef_'):
             ridge_coef = final_model.coef_
             if ridge_coef.ndim == 2:  # For multi-class, take first class
                 ridge_coef = ridge_coef[0]
+
+            # Extract only coefficients for head features (first head_dim features)
+            # Confounders come after, so we slice them off
+            ridge_coef = ridge_coef[:self.head_dim]
         else:
             ridge_coef = np.zeros(self.head_dim)
 
@@ -169,6 +196,7 @@ class AttentionHeadProber:
             val_score=np.mean(val_scores),
             spearman_r=spearman_r,
             spearman_p=spearman_p,
+            mcc_score=mcc_score,
             ridge_coef=ridge_coef,
             ridge_intercept=ridge_intercept,
             feature_std=feature_std
@@ -178,16 +206,23 @@ class AttentionHeadProber:
         self,
         activations: torch.Tensor,
         targets: np.ndarray,
-        aggregation: Literal['mean', 'last_token'] = 'mean'
+        aggregation: Literal['mean', 'last_token'] = 'mean',
+        confounder_features: np.ndarray = None
     ) -> CircuitProbingResults:
         """
         Probe all attention heads across all layers.
+
+        Supports multivariate regression with confounder control:
+        If confounder_features provided, each head is probed while controlling
+        for other demographics, isolating head-specific effects.
 
         Args:
             activations: Shape (n_samples, n_layers, n_heads, seq_len, head_dim)
                         or (n_samples, n_layers, n_heads, head_dim) if already aggregated
             targets: Shape (n_samples,) - political attitude labels/scores
             aggregation: How to aggregate across sequence length
+            confounder_features: Optional shape (n_samples, n_confounders)
+                                One-hot encoded demographic confounders
 
         Returns:
             CircuitProbingResults with all head results and top-k ranking
@@ -215,16 +250,20 @@ class AttentionHeadProber:
                 # Extract features for this head
                 head_features = activations[:, layer, head, :]  # Shape: (n_samples, head_dim)
 
-                # Probe this head
-                result = self.probe_single_head(head_features, targets, layer, head)
+                # Probe this head (with confounders if provided)
+                result = self.probe_single_head(
+                    head_features, targets, layer, head,
+                    confounder_features=confounder_features
+                )
                 head_results.append(result)
 
-        # Rank heads by Spearman correlation (absolute value)
-        head_results.sort(key=lambda x: abs(x.spearman_r), reverse=True)
+        # Rank heads by Matthews Correlation Coefficient (absolute value)
+        # MCC provides better discrimination between components than Spearman
+        head_results.sort(key=lambda x: abs(x.mcc_score), reverse=True)
 
         # Extract top-k heads
         top_k_heads = [(r.layer, r.head) for r in head_results]
-        top_k_scores = [r.spearman_r for r in head_results]
+        top_k_scores = [r.mcc_score for r in head_results]  # Use MCC scores (primary metric)
 
         return CircuitProbingResults(
             head_results=head_results,

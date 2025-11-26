@@ -96,6 +96,21 @@ DEFAULT_N_SAMPLES_PER_CATEGORY = 100
 DEFAULT_INTERVENTION_STRENGTH = 10.0
 DEFAULT_EVAL_SAMPLE_SIZE = 50
 
+# Demographic confounders configuration
+# For each target demographic, specify which other demographics to control for
+# This enables multivariate regression that isolates the unique contribution of each demographic
+DEMOGRAPHIC_CONFOUNDERS = {
+    'ideology': ['age', 'gender', 'education', 'race'],
+    'age': ['ideology', 'gender', 'education', 'race'],
+    'gender': ['age', 'ideology', 'education', 'race'],
+    'education': ['age', 'gender', 'ideology', 'race'],
+    'race': ['age', 'gender', 'ideology', 'education'],
+    'marital_status': ['age', 'gender', 'ideology', 'education'],
+    'income': ['age', 'gender', 'education', 'ideology'],
+    'religion': ['age', 'gender', 'ideology', 'education'],
+    'urban_rural': ['age', 'gender', 'ideology', 'education'],
+}
+
 # Available demographics and political questions
 ALL_DEMOGRAPHICS = [
     'gender', 'age', 'race', 'education', 'marital_status',
@@ -472,8 +487,16 @@ def extract_activations_for_question(
     device: str,
     probe_type: str,
     prompt_style: str = "original"
-) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], List[str]]:
-    """Extract activations for a single question"""
+) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], List[str], Optional[np.ndarray]]:
+    """
+    Extract activations for a single question.
+
+    Returns:
+        activations: Model activations
+        category_labels: Demographic category labels for each sample
+        category_names: List of category names
+        user_indices: DataFrame row indices for each sample (for confounder extraction)
+    """
 
     # Filter for valid responses
     valid_df = df[df[question].notna()].copy()
@@ -488,7 +511,7 @@ def extract_activations_for_question(
 
     if n_categories < 2:
         print(f"  WARNING: Insufficient categories ({n_categories})")
-        return None, None, []
+        return None, None, [], None
 
     # Sample from each category
     category_samples = []
@@ -510,6 +533,7 @@ def extract_activations_for_question(
     # Create prompts WITHOUT the target demographic
     all_prompts = []
     all_category_labels = []
+    all_user_indices = []  # Track DataFrame row indices for confounder extraction
 
     # Get answer options
     answer_options = None
@@ -528,6 +552,7 @@ def extract_activations_for_question(
             )
             all_prompts.append(prompt)
             all_category_labels.append(category_idx)
+            all_user_indices.append(idx)  # Store DataFrame row index
 
     # Extract activations
     if not BAUKIT_AVAILABLE:
@@ -555,8 +580,63 @@ def extract_activations_for_question(
         raise ValueError(f"Unknown probe_type: {probe_type}")
 
     category_labels = np.array(all_category_labels)
+    user_indices = np.array(all_user_indices)
 
-    return all_activations, category_labels, category_names
+    return all_activations, category_labels, category_names, user_indices
+
+
+def encode_confounder_features(
+    df: pd.DataFrame,
+    user_indices: np.ndarray,
+    confounder_names: List[str]
+) -> Optional[np.ndarray]:
+    """
+    One-hot encode confounder demographic variables.
+
+    This function prepares confounder features for multivariate regression,
+    allowing the model to control for confounding demographics when probing
+    for a specific target demographic.
+
+    Args:
+        df: ANES dataframe with demographic columns
+        user_indices: Row indices of users to extract (must match activation samples)
+        confounder_names: List of demographic column names to use as confounders
+
+    Returns:
+        One-hot encoded confounder matrix: (n_samples, n_confounder_features)
+        Returns None if no confounders specified
+
+    Example:
+        If confounder_names = ['age', 'gender'] with:
+        - age: ['18-29', '30-44', '45-64', '65+']  (4 categories)
+        - gender: ['Male', 'Female']  (2 categories)
+
+        Output shape: (n_samples, 6)  [4 + 2 one-hot features]
+    """
+    from sklearn.preprocessing import OneHotEncoder
+
+    if not confounder_names or len(confounder_names) == 0:
+        return None
+
+    # Extract confounder values for selected users
+    try:
+        confounder_df = df.loc[user_indices, confounder_names]
+    except KeyError as e:
+        print(f"Warning: Confounder column not found in dataframe: {e}")
+        return None
+
+    # Check for missing values
+    if confounder_df.isnull().any().any():
+        print(f"Warning: Missing values found in confounders. Filling with 'Unknown'.")
+        confounder_df = confounder_df.fillna('Unknown')
+
+    # One-hot encode (sparse_output=False gives dense array)
+    encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+    confounder_matrix = encoder.fit_transform(confounder_df)
+
+    print(f"  Encoded {len(confounder_names)} confounders → {confounder_matrix.shape[1]} features")
+
+    return confounder_matrix
 
 
 def probe_and_select_top_components(
@@ -565,10 +645,30 @@ def probe_and_select_top_components(
     model_config,
     probe_type: str,
     ridge_alpha: float,
-    top_k: int
+    top_k: int,
+    demographic: str = None,
+    df: pd.DataFrame = None,
+    user_indices: np.ndarray = None,
+    use_confounders: bool = True
 ) -> Dict:
     """
     Probe activations to identify top N layers/heads and extract intervention weights.
+
+    Supports confounder control:
+    If demographic, df, and user_indices provided, will control for confounding
+    demographics during probing, isolating the unique contribution of each component.
+
+    Args:
+        activations: Model activations to probe
+        labels: Target demographic labels
+        model_config: Model configuration dict
+        probe_type: 'attention' or 'mlp'
+        ridge_alpha: Ridge regularization parameter
+        top_k: Number of top components to select
+        demographic: Target demographic name (for confounder lookup)
+        df: Full ANES dataframe (for extracting confounder values)
+        user_indices: Indices of users in activations (for matching to df rows)
+        use_confounders: Whether to use confounders (default True)
 
     Returns:
         Dictionary containing:
@@ -577,6 +677,14 @@ def probe_and_select_top_components(
         - intervention_weights: Pre-computed intervention weights
     """
     print(f"\n  Running probing to identify top {top_k} components...")
+
+    # Encode confounder features if available
+    confounder_features = None
+    if use_confounders and demographic is not None and df is not None and user_indices is not None:
+        confounder_names = DEMOGRAPHIC_CONFOUNDERS.get(demographic, [])
+        if confounder_names:
+            print(f"  Controlling for confounders: {confounder_names}")
+            confounder_features = encode_confounder_features(df, user_indices, confounder_names)
 
     if probe_type == 'attention':
         prober = AttentionHeadProber(
@@ -589,7 +697,11 @@ def probe_and_select_top_components(
             random_state=42
         )
 
-        probing_results = prober.probe_all_heads(activations, labels, aggregation='mean')
+        probing_results = prober.probe_all_heads(
+            activations, labels,
+            aggregation='mean',
+            confounder_features=confounder_features
+        )
         intervention_weights = prober.get_intervention_weights(probing_results, top_k=top_k)
 
         # Extract top head indices (both probing_results and head items are dataclasses)
@@ -598,7 +710,8 @@ def probe_and_select_top_components(
 
     elif probe_type == 'mlp':
         probing_results = probe_mlp_layers(
-            activations, labels, model_config['num_layers'], ridge_alpha
+            activations, labels, model_config['num_layers'], ridge_alpha,
+            confounder_features=confounder_features
         )
         intervention_weights = extract_mlp_intervention_weights(probing_results, top_k=top_k)
 
@@ -648,7 +761,8 @@ def save_probing_results(
                     'layer': head_info.layer,
                     'head': head_info.head,
                     'accuracy': head_info.val_score,  # val_score is the accuracy
-                    'spearman_r': head_info.spearman_r,
+                    'mcc_score': head_info.mcc_score,  # Matthews Correlation Coefficient (primary metric)
+                    'spearman_r': head_info.spearman_r,  # Kept for comparison
                     'p_value': head_info.spearman_p
                 })
             else:
@@ -657,6 +771,7 @@ def save_probing_results(
                     'layer': head_info['layer'],
                     'head': head_info['head'],
                     'accuracy': head_info['accuracy'],
+                    'mcc_score': head_info.get('mcc_score', 0.0),
                     'spearman_r': head_info['spearman_r'],
                     'p_value': head_info['p_value']
                 })
@@ -689,7 +804,8 @@ def save_probing_results(
             results_list.append({
                 'layer': layer_info['layer'],
                 'accuracy': layer_info['accuracy'],
-                'spearman_r': layer_info['spearman_r'],
+                'mcc_score': layer_info['mcc_score'],  # Matthews Correlation Coefficient (primary metric)
+                'spearman_r': layer_info['spearman_r'],  # Kept for comparison
                 'p_value': layer_info['p_value']
             })
 
@@ -722,7 +838,7 @@ def plot_spearman_correlations(
     top_k: int = None
 ):
     """
-    Create and save visualization of spearman correlations.
+    Create and save visualization of MCC (Matthews Correlation Coefficient) scores.
 
     Args:
         probing_results: Results from probe_and_select_top_components (CircuitProbingResults or Dict)
@@ -741,30 +857,30 @@ def plot_spearman_correlations(
             # ProbingResult dataclass
             layers = [h.layer for h in head_results]
             heads = [h.head for h in head_results]
-            spearman_rs = [h.spearman_r for h in head_results]
+            mcc_scores = [h.mcc_score for h in head_results]
         else:
             # Dict format
             layers = [h['layer'] for h in head_results]
             heads = [h['head'] for h in head_results]
-            spearman_rs = [h['spearman_r'] for h in head_results]
+            mcc_scores = [h['mcc_score'] for h in head_results]
 
         # Create figure
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-        # Plot 1: Bar plot of all heads (sorted by spearman)
+        # Plot 1: Bar plot of all heads (sorted by MCC)
         if head_results and hasattr(head_results[0], 'layer'):
             x_labels = [f"L{h.layer}-H{h.head}" for h in head_results[:50]]  # Top 50
         else:
             x_labels = [f"L{h['layer']}-H{h['head']}" for h in head_results[:50]]  # Top 50
         if top_k:
-            colors = ['red' if i < top_k else 'blue' for i in range(min(50, len(spearman_rs)))]
+            colors = ['red' if i < top_k else 'blue' for i in range(min(50, len(mcc_scores)))]
         else:
-            colors = ['blue'] * min(50, len(spearman_rs))
+            colors = ['blue'] * min(50, len(mcc_scores))
 
-        ax1.bar(range(len(x_labels)), spearman_rs[:50], color=colors, alpha=0.7)
+        ax1.bar(range(len(x_labels)), mcc_scores[:50], color=colors, alpha=0.7)
         ax1.set_xlabel('Layer-Head', fontsize=12)
-        ax1.set_ylabel('Spearman Correlation', fontsize=12)
-        ax1.set_title(f'Top 50 Attention Heads by Spearman Correlation\n{demographic.title()}', fontsize=14)
+        ax1.set_ylabel('Matthews Correlation Coefficient (MCC)', fontsize=12)
+        ax1.set_title(f'Top 50 Attention Heads by MCC\n{demographic.title()}', fontsize=14)
         ax1.tick_params(axis='x', rotation=90, labelsize=8)
         ax1.set_xticks(range(len(x_labels)))
         ax1.set_xticklabels(x_labels)
@@ -780,26 +896,26 @@ def plot_spearman_correlations(
             ]
             ax1.legend(handles=legend_elements, loc='upper right')
 
-        # Plot 2: Heatmap of spearman correlations by layer and head
+        # Plot 2: Heatmap of MCC scores by layer and head
         num_layers = max(layers) + 1
         num_heads = max(heads) + 1
 
         # Create matrix (handle both ProbingResult dataclass and dict)
-        spearman_matrix = np.zeros((num_layers, num_heads))
+        mcc_matrix = np.zeros((num_layers, num_heads))
         for h in head_results:
             if hasattr(h, 'layer'):
-                spearman_matrix[h.layer, h.head] = h.spearman_r
+                mcc_matrix[h.layer, h.head] = h.mcc_score
             else:
-                spearman_matrix[h['layer'], h['head']] = h['spearman_r']
+                mcc_matrix[h['layer'], h['head']] = h['mcc_score']
 
-        im = ax2.imshow(spearman_matrix, aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1)
+        im = ax2.imshow(mcc_matrix, aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1)
         ax2.set_xlabel('Head', fontsize=12)
         ax2.set_ylabel('Layer', fontsize=12)
-        ax2.set_title(f'Spearman Correlation Heatmap\n{demographic.title()}', fontsize=14)
+        ax2.set_title(f'MCC Score Heatmap\n{demographic.title()}', fontsize=14)
 
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax2)
-        cbar.set_label('Spearman Correlation', fontsize=10)
+        cbar.set_label('Matthews Correlation Coefficient', fontsize=10)
 
         # Mark top K heads
         if top_k:
@@ -812,32 +928,32 @@ def plot_spearman_correlations(
         plt.tight_layout()
 
         # Save figure
-        fig_path = output_path / f"{demographic}_attention_spearman_correlations.png"
+        fig_path = output_path / f"{demographic}_attention_mcc_scores.png"
         plt.savefig(fig_path, dpi=300, bbox_inches='tight')
         plt.close()
 
-        print(f"  Saved correlation plot to: {fig_path}")
+        print(f"  Saved MCC plot to: {fig_path}")
 
     elif probe_type == 'mlp':
         layer_results = probing_results['layer_results']
 
         # Extract data
         layers = [l['layer'] for l in layer_results]
-        spearman_rs = [l['spearman_r'] for l in layer_results]
+        mcc_scores = [l['mcc_score'] for l in layer_results]
         accuracies = [l['accuracy'] for l in layer_results]
 
         # Create figure
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-        # Plot 1: Spearman correlation by layer
+        # Plot 1: MCC scores by layer
         if top_k:
             colors = ['red' if i < top_k else 'blue' for i in range(len(layers))]
         else:
             colors = ['blue'] * len(layers)
-        ax1.bar(layers, spearman_rs, color=colors, alpha=0.7)
+        ax1.bar(layers, mcc_scores, color=colors, alpha=0.7)
         ax1.set_xlabel('Layer', fontsize=12)
-        ax1.set_ylabel('Spearman Correlation', fontsize=12)
-        ax1.set_title(f'MLP Layer Spearman Correlations\n{demographic.title()}', fontsize=14)
+        ax1.set_ylabel('Matthews Correlation Coefficient (MCC)', fontsize=12)
+        ax1.set_title(f'MLP Layer MCC Scores\n{demographic.title()}', fontsize=14)
         ax1.grid(axis='y', alpha=0.3)
         ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
 
@@ -860,11 +976,11 @@ def plot_spearman_correlations(
         plt.tight_layout()
 
         # Save figure
-        fig_path = output_path / f"{demographic}_mlp_spearman_correlations.png"
+        fig_path = output_path / f"{demographic}_mlp_mcc_scores.png"
         plt.savefig(fig_path, dpi=300, bbox_inches='tight')
         plt.close()
 
-        print(f"  Saved correlation plot to: {fig_path}")
+        print(f"  Saved MCC plot to: {fig_path}")
 
 
 def filter_activations_by_top_components(
@@ -991,7 +1107,7 @@ def run_extraction_phase(args):
             print(f"  {q_label}")
 
             try:
-                activations, labels, category_names = extract_activations_for_question(
+                activations, labels, category_names, user_indices = extract_activations_for_question(
                     model, tokenizer, df, question, demographic,
                     args.n_samples_per_category, args.device, args.probe_type,
                     args.prompt_style
@@ -1004,7 +1120,8 @@ def run_extraction_phase(args):
                 question_extractions[question] = {
                     'activations': activations,
                     'labels': labels,
-                    'category_names': category_names
+                    'category_names': category_names,
+                    'user_indices': user_indices  # Store for confounder extraction
                 }
 
                 print(f"  Extracted: {activations.shape if not isinstance(activations, tuple) else (activations[0].shape, activations[1].shape)}")
@@ -1066,27 +1183,35 @@ def run_extraction_phase(args):
                 # Concatenate activations from TRAIN questions only
                 train_activations_list = []
                 train_labels_list = []
+                train_user_indices_list = []  # For confounder extraction
 
                 for question in train_questions:
                     q_data = question_extractions[question]
                     train_activations_list.append(q_data['activations'])
                     train_labels_list.append(q_data['labels'])
+                    train_user_indices_list.append(q_data['user_indices'])
 
                 # Concatenate
                 concatenated_activations = torch.cat(train_activations_list, dim=0)
                 concatenated_labels = np.concatenate(train_labels_list)
+                concatenated_user_indices = np.concatenate(train_user_indices_list)
 
                 print(f"\nTrain activations shape: {concatenated_activations.shape}")
                 print(f"Train samples: {len(concatenated_labels)}")
 
                 # Run probing on TRAIN questions only to select top N
+                # Passing demographic, df, and user_indices enables confounder control
                 probing_data = probe_and_select_top_components(
                     concatenated_activations,
                     concatenated_labels,
                     model_config,
                     args.probe_type,
                     args.ridge_alpha,
-                    args.top_k_heads
+                    args.top_k_heads,
+                    demographic=demographic,  # For confounder lookup
+                    df=df,  # For extracting confounder values
+                    user_indices=concatenated_user_indices,  # Matching indices
+                    use_confounders=True  # Enable confounder control
                 )
 
                 top_indices = probing_data['top_indices']
@@ -1181,32 +1306,79 @@ def run_extraction_phase(args):
 # PHASE 2: K-FOLD INTERVENTION
 # ============================================================================
 
-def probe_mlp_layers(activations: torch.Tensor, labels: np.ndarray, num_layers: int, ridge_alpha: float):
-    """Probe MLP layers for classification"""
+def probe_mlp_layers(
+    activations: torch.Tensor,
+    labels: np.ndarray,
+    num_layers: int,
+    ridge_alpha: float,
+    confounder_features: np.ndarray = None
+):
+    """
+    Probe MLP layers for classification.
+
+    Supports multivariate regression with confounder control:
+    If confounder_features provided, each layer is probed while controlling
+    for other demographics, isolating layer-specific effects.
+
+    Args:
+        activations: MLP layer activations, shape (n_samples, n_layers, hidden_dim)
+        labels: Target demographic labels, shape (n_samples,)
+        num_layers: Number of MLP layers
+        ridge_alpha: Ridge regression regularization parameter
+        confounder_features: Optional shape (n_samples, n_confounders)
+                            One-hot encoded demographic confounders
+
+    Returns:
+        Dict with layer_results sorted by MCC score
+    """
     from sklearn.linear_model import RidgeClassifier
     from sklearn.model_selection import cross_val_score
+    from sklearn.metrics import matthews_corrcoef
     from scipy.stats import spearmanr
 
     layer_results = []
 
     for layer in range(num_layers):
         layer_act = activations[:, layer, :].numpy()
+
+        # Concatenate layer activations with confounders if provided
+        if confounder_features is not None:
+            combined_features = np.hstack([layer_act, confounder_features])
+        else:
+            combined_features = layer_act
+
         clf = RidgeClassifier(alpha=ridge_alpha, random_state=42)
 
-        scores = cross_val_score(clf, layer_act, labels, cv=2, scoring='accuracy')
-        clf.fit(layer_act, labels)
-        predictions = clf.predict(layer_act)
+        # Train and evaluate on combined features (layer + confounders)
+        scores = cross_val_score(clf, combined_features, labels, cv=2, scoring='accuracy')
+        clf.fit(combined_features, labels)
+        predictions = clf.predict(combined_features)
         spearman_r, p_value = spearmanr(labels, predictions)
+
+        # Calculate Matthews Correlation Coefficient (MCC) for better discrimination
+        mcc_score = matthews_corrcoef(labels, predictions)
+
+        # Extract coefficients for layer features only (not confounders)
+        coef = clf.coef_ if hasattr(clf, 'coef_') else None
+        if coef is not None and confounder_features is not None:
+            # Slice off confounder coefficients, keep only layer coefficients
+            layer_dim = layer_act.shape[1]
+            if coef.ndim == 2:  # Multi-class
+                coef = coef[:, :layer_dim]
+            else:  # Binary
+                coef = coef[:layer_dim]
 
         layer_results.append({
             'layer': layer,
             'accuracy': scores.mean(),
             'spearman_r': spearman_r,
+            'mcc_score': mcc_score,
             'p_value': p_value,
-            'coefficients': clf.coef_ if hasattr(clf, 'coef_') else None
+            'coefficients': coef
         })
 
-    layer_results = sorted(layer_results, key=lambda x: abs(x['spearman_r']), reverse=True)
+    # Rank layers by MCC (provides better separation than Spearman)
+    layer_results = sorted(layer_results, key=lambda x: abs(x['mcc_score']), reverse=True)
     return {'layer_results': layer_results}
 
 
