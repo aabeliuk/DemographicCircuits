@@ -625,10 +625,17 @@ def encode_confounder_features(
         print(f"Warning: Confounder column not found in dataframe: {e}")
         return None
 
-    # Check for missing values
+    # Convert categorical columns to object type (to allow 'Unknown' category)
+    for col in confounder_df.columns:
+        if pd.api.types.is_categorical_dtype(confounder_df[col]):
+            confounder_df[col] = confounder_df[col].astype(str)
+
+    # Check for missing values and fill with 'Unknown'
     if confounder_df.isnull().any().any():
         print(f"Warning: Missing values found in confounders. Filling with 'Unknown'.")
         confounder_df = confounder_df.fillna('Unknown')
+        # Also convert 'nan' strings to 'Unknown' (from categorical conversion)
+        confounder_df = confounder_df.replace('nan', 'Unknown')
 
     # One-hot encode (sparse_output=False gives dense array)
     encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
