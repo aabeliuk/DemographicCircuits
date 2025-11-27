@@ -706,7 +706,7 @@ def probe_and_select_top_components(
 
         probing_results = prober.probe_all_heads(
             activations, labels,
-            aggregation='mean',
+            aggregation='last_token',
             confounder_features=confounder_features
         )
         intervention_weights = prober.get_intervention_weights(probing_results, top_k=top_k)
