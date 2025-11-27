@@ -699,7 +699,7 @@ def probe_and_select_top_components(
             num_heads=model_config['num_heads'],
             head_dim=model_config['head_dim'],
             alpha=ridge_alpha,
-            n_folds=2,
+            n_folds=3,
             task_type='classification',
             random_state=42
         )
@@ -720,7 +720,7 @@ def probe_and_select_top_components(
             num_layers=model_config['num_layers'],
             hidden_dim=model_config['hidden_size'],
             alpha=ridge_alpha,
-            n_folds=2,
+            n_folds=3,
             task_type='classification',
             random_state=42
         )
