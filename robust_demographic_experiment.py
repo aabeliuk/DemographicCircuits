@@ -842,19 +842,42 @@ def plot_spearman_correlations(
     probe_type: str,
     output_path: Path,
     demographic: str,
-    top_k: int = None
+    top_k: int = None,
+    run_id: str = None,
+    fold_idx: int = None,
+    intervention_strength: float = None
 ):
     """
-    Create and save visualization of MCC (Matthews Correlation Coefficient) scores.
+    Create and save visualizations of both MCC and Spearman correlation scores.
+
+    Generates two separate plots:
+    - MCC scores plot
+    - Spearman correlation scores plot
 
     Args:
         probing_results: Results from probe_and_select_top_components (CircuitProbingResults or Dict)
         probe_type: 'attention' or 'mlp'
-        output_path: Directory to save figure
+        output_path: Directory to save figures
         demographic: Name of demographic being probed
         top_k: Number of top components to highlight
+        run_id: Run identifier for filename
+        fold_idx: Fold index for filename (0-indexed)
+        intervention_strength: Intervention strength for filename (intervention phase only)
     """
     output_path.mkdir(parents=True, exist_ok=True)
+
+    # Build filename with all available parameters
+    filename_parts = [demographic, probe_type]
+    if run_id:
+        filename_parts.append(run_id)
+    if fold_idx is not None:
+        filename_parts.append(f"fold{fold_idx + 1}")
+    if top_k:
+        filename_parts.append(f"k{top_k}")
+    if intervention_strength is not None:
+        filename_parts.append(f"s{intervention_strength}")
+
+    base_filename = "_".join(filename_parts)
 
     if probe_type == 'attention':
         head_results = probing_results.head_results if hasattr(probing_results, 'head_results') else probing_results['head_results']
@@ -865,11 +888,13 @@ def plot_spearman_correlations(
             layers = [h.layer for h in head_results]
             heads = [h.head for h in head_results]
             mcc_scores = [h.mcc_score for h in head_results]
+            spearman_rs = [h.spearman_r for h in head_results]
         else:
             # Dict format
             layers = [h['layer'] for h in head_results]
             heads = [h['head'] for h in head_results]
             mcc_scores = [h['mcc_score'] for h in head_results]
+            spearman_rs = [h['spearman_r'] for h in head_results]
 
         # Create figure
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
@@ -924,22 +949,86 @@ def plot_spearman_correlations(
         cbar = plt.colorbar(im, ax=ax2)
         cbar.set_label('Matthews Correlation Coefficient', fontsize=10)
 
-        # Mark top K heads
-        if top_k:
-            for i, h in enumerate(head_results[:top_k]):
-                if hasattr(h, 'layer'):
-                    ax2.plot(h.head, h.layer, 'g*', markersize=10, markeredgecolor='yellow', markeredgewidth=1)
-                else:
-                    ax2.plot(h['head'], h['layer'], 'g*', markersize=10, markeredgecolor='yellow', markeredgewidth=1)
+        # # Mark top K heads
+        # if top_k:
+        #     for i, h in enumerate(head_results[:top_k]):
+        #         if hasattr(h, 'layer'):
+        #             ax2.plot(h.head, h.layer, 'g*', markersize=10, markeredgecolor='yellow', markeredgewidth=1)
+        #         else:
+        #             ax2.plot(h['head'], h['layer'], 'g*', markersize=10, markeredgecolor='yellow', markeredgewidth=1)
 
         plt.tight_layout()
 
-        # Save figure
-        fig_path = output_path / f"{demographic}_attention_mcc_scores.png"
-        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+        # Save MCC figure
+        mcc_fig_path = output_path / f"{base_filename}_mcc_scores.png"
+        plt.savefig(mcc_fig_path, dpi=300, bbox_inches='tight')
         plt.close()
 
-        print(f"  Saved MCC plot to: {fig_path}")
+        print(f"  Saved MCC plot to: {mcc_fig_path}")
+
+        # ====================================================================
+        # Create Spearman Correlation Plot for Attention Heads
+        # ====================================================================
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+        # Plot 1: Bar plot of all heads (sorted by absolute Spearman r)
+        if head_results and hasattr(head_results[0], 'layer'):
+            x_labels = [f"L{h.layer}-H{h.head}" for h in head_results[:50]]  # Top 50
+        else:
+            x_labels = [f"L{h['layer']}-H{h['head']}" for h in head_results[:50]]  # Top 50
+        if top_k:
+            colors = ['red' if i < top_k else 'blue' for i in range(min(50, len(spearman_rs)))]
+        else:
+            colors = ['blue'] * min(50, len(spearman_rs))
+
+        ax1.bar(range(len(x_labels)), spearman_rs[:50], color=colors, alpha=0.7)
+        ax1.set_xlabel('Layer-Head', fontsize=12)
+        ax1.set_ylabel('Spearman Correlation (r)', fontsize=12)
+        ax1.set_title(f'Top 50 Attention Heads by Spearman Correlation\n{demographic.title()}', fontsize=14)
+        ax1.tick_params(axis='x', rotation=90, labelsize=8)
+        ax1.set_xticks(range(len(x_labels)))
+        ax1.set_xticklabels(x_labels)
+        ax1.grid(axis='y', alpha=0.3)
+        ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+
+        # Add legend
+        if top_k:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='red', alpha=0.7, label=f'Top {top_k} (used)'),
+                Patch(facecolor='blue', alpha=0.7, label='Other heads')
+            ]
+            ax1.legend(handles=legend_elements, loc='upper right')
+
+        # Plot 2: Heatmap of Spearman correlation scores by layer and head
+        num_layers = max(layers) + 1
+        num_heads = max(heads) + 1
+
+        # Create matrix (handle both ProbingResult dataclass and dict)
+        spearman_matrix = np.zeros((num_layers, num_heads))
+        for h in head_results:
+            if hasattr(h, 'layer'):
+                spearman_matrix[h.layer, h.head] = h.spearman_r
+            else:
+                spearman_matrix[h['layer'], h['head']] = h['spearman_r']
+
+        im = ax2.imshow(spearman_matrix, aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1)
+        ax2.set_xlabel('Head', fontsize=12)
+        ax2.set_ylabel('Layer', fontsize=12)
+        ax2.set_title(f'Spearman Correlation Heatmap\n{demographic.title()}', fontsize=14)
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax2)
+        cbar.set_label('Spearman Correlation', fontsize=10)
+
+        plt.tight_layout()
+
+        # Save Spearman figure
+        spearman_fig_path = output_path / f"{base_filename}_spearman_scores.png"
+        plt.savefig(spearman_fig_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"  Saved Spearman plot to: {spearman_fig_path}")
 
     elif probe_type == 'mlp':
         layer_results = probing_results['layer_results']
@@ -947,6 +1036,7 @@ def plot_spearman_correlations(
         # Extract data
         layers = [l['layer'] for l in layer_results]
         mcc_scores = [l['mcc_score'] for l in layer_results]
+        spearman_rs = [l['spearman_r'] for l in layer_results]
         accuracies = [l['accuracy'] for l in layer_results]
 
         # Create figure
@@ -982,12 +1072,54 @@ def plot_spearman_correlations(
 
         plt.tight_layout()
 
-        # Save figure
-        fig_path = output_path / f"{demographic}_mlp_mcc_scores.png"
-        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+        # Save MCC figure
+        mcc_fig_path = output_path / f"{base_filename}_mcc_scores.png"
+        plt.savefig(mcc_fig_path, dpi=300, bbox_inches='tight')
         plt.close()
 
-        print(f"  Saved MCC plot to: {fig_path}")
+        print(f"  Saved MCC plot to: {mcc_fig_path}")
+
+        # ====================================================================
+        # Create Spearman Correlation Plot for MLP Layers
+        # ====================================================================
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+        # Plot 1: Spearman scores by layer
+        if top_k:
+            colors = ['red' if i < top_k else 'blue' for i in range(len(layers))]
+        else:
+            colors = ['blue'] * len(layers)
+        ax1.bar(layers, spearman_rs, color=colors, alpha=0.7)
+        ax1.set_xlabel('Layer', fontsize=12)
+        ax1.set_ylabel('Spearman Correlation (r)', fontsize=12)
+        ax1.set_title(f'MLP Layer Spearman Correlations\n{demographic.title()}', fontsize=14)
+        ax1.grid(axis='y', alpha=0.3)
+        ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+
+        # Add legend
+        if top_k:
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor='red', alpha=0.7, label=f'Top {top_k} (used)'),
+                Patch(facecolor='blue', alpha=0.7, label='Other layers')
+            ]
+            ax1.legend(handles=legend_elements, loc='upper right')
+
+        # Plot 2: Accuracy by layer (same as MCC plot for consistency)
+        ax2.bar(layers, accuracies, color=colors, alpha=0.7)
+        ax2.set_xlabel('Layer', fontsize=12)
+        ax2.set_ylabel('Accuracy', fontsize=12)
+        ax2.set_title(f'MLP Layer Classification Accuracy\n{demographic.title()}', fontsize=14)
+        ax2.grid(axis='y', alpha=0.3)
+
+        plt.tight_layout()
+
+        # Save Spearman figure
+        spearman_fig_path = output_path / f"{base_filename}_spearman_scores.png"
+        plt.savefig(spearman_fig_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"  Saved Spearman plot to: {spearman_fig_path}")
 
 
 def filter_activations_by_top_components(
@@ -1240,8 +1372,10 @@ def run_extraction_phase(args):
                     probing_data['probing_results'],
                     args.probe_type,
                     results_output_dir,
-                    f"{demographic}_fold{fold_idx + 1}",
-                    args.top_k_heads
+                    demographic,
+                    args.top_k_heads,
+                    run_id=args.run_id,
+                    fold_idx=fold_idx
                 )
 
                 # Clean up concatenated data to free memory
@@ -1416,42 +1550,6 @@ def extract_mlp_intervention_weights(results, top_k=10):
         intercept = 0.0
         # Store full coefficient matrix (1D for binary, 2D for multiclass)
         intervention_weights[layer] = (coef, intercept, std)
-
-    return intervention_weights
-
-
-def train_probes_on_fold(
-    activations,
-    labels,
-    model_config,
-    probe_type: str,
-    ridge_alpha: float,
-    top_k: int
-) -> Dict:
-    """Train probes on training fold and extract intervention weights"""
-
-    if probe_type == 'attention':
-        prober = AttentionHeadProber(
-            num_layers=model_config['num_layers'],
-            num_heads=model_config['num_heads'],
-            head_dim=model_config['head_dim'],
-            alpha=ridge_alpha,
-            n_folds=2,
-            task_type='classification',
-            random_state=42
-        )
-
-        probing_results = prober.probe_all_heads(activations, labels, aggregation='mean')
-        intervention_weights = prober.get_intervention_weights(probing_results, top_k=top_k)
-
-    elif probe_type == 'mlp':
-        probing_results = probe_mlp_layers(
-            activations, labels, model_config['num_layers'], ridge_alpha
-        )
-        intervention_weights = extract_mlp_intervention_weights(probing_results, top_k=top_k)
-
-    else:
-        raise ValueError(f"Unsupported probe_type for intervention: {probe_type}")
 
     return intervention_weights
 
@@ -3325,12 +3423,14 @@ def run_intervention_phase(args):
             # Aggregate training data
             train_activations = []
             train_labels = []
+            train_user_indices = []  # For confounder extraction
             category_names = None
 
             for question in train_questions:
                 q_data = question_extractions[question]
                 activations = q_data['activations']
                 labels = q_data['labels']
+                user_indices = q_data.get('user_indices', None)  # May not exist in old extraction files
 
                 if category_names is None:
                     category_names = q_data['category_names']
@@ -3342,6 +3442,8 @@ def run_intervention_phase(args):
 
                 train_activations.append(activations)
                 train_labels.append(labels)
+                if user_indices is not None:
+                    train_user_indices.append(user_indices)
 
             if args.probe_type == 'both':
                 continue
@@ -3349,6 +3451,12 @@ def run_intervention_phase(args):
             # Concatenate training data
             train_activations = torch.cat(train_activations, dim=0)
             train_labels = np.concatenate(train_labels)
+
+            # Concatenate user indices if available (for confounder control)
+            if len(train_user_indices) > 0:
+                train_user_indices = np.concatenate(train_user_indices)
+            else:
+                train_user_indices = None
 
             print(f"\nTraining data shape: {train_activations.shape}")
             print(f"Training labels: {len(train_labels)}")
@@ -3364,10 +3472,15 @@ def run_intervention_phase(args):
             else:
                 # Full probing: select top components and train weights
                 print(f"\nTraining probes on {len(train_questions)} questions...")
-                intervention_weights = train_probes_on_fold(
+                probing_data = probe_and_select_top_components(
                     train_activations, train_labels, model_config,
-                    args.probe_type, args.ridge_alpha, args.top_k_heads
+                    args.probe_type, args.ridge_alpha, args.top_k_heads,
+                    demographic=demographic,
+                    df=df,
+                    user_indices=train_user_indices,
+                    use_confounders=True
                 )
+                intervention_weights = probing_data['intervention_weights']
 
             print(f"Extracted {len(intervention_weights)} intervention weights")
 
