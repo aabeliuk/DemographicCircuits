@@ -71,7 +71,7 @@ from pathlib import Path
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-from probing_classifier import AttentionHeadProber
+from probing_classifier import AttentionHeadProber, MLPLayerProber
 from baukit_activation_extraction import (
     extract_full_activations_baukit,
     extract_mlp_activations_baukit,
@@ -716,15 +716,24 @@ def probe_and_select_top_components(
         top_indices = [(head.layer, head.head) for head in top_heads]
 
     elif probe_type == 'mlp':
-        probing_results = probe_mlp_layers(
-            activations, labels, model_config['num_layers'], ridge_alpha,
+        prober = MLPLayerProber(
+            num_layers=model_config['num_layers'],
+            hidden_dim=model_config['hidden_size'],
+            alpha=ridge_alpha,
+            n_folds=2,
+            task_type='classification',
+            random_state=42
+        )
+
+        probing_results = prober.probe_all_layers(
+            activations, labels,
             confounder_features=confounder_features
         )
-        intervention_weights = extract_mlp_intervention_weights(probing_results, top_k=top_k)
+        intervention_weights = prober.get_intervention_weights(probing_results, top_k=top_k)
 
         # Extract top layer indices
-        top_layers = probing_results['layer_results'][:top_k]
-        top_indices = [layer['layer'] for layer in top_layers]
+        top_layers = probing_results.layer_results[:top_k]
+        top_indices = [layer.layer for layer in top_layers]
 
     else:
         raise ValueError(f"Unsupported probe_type: {probe_type}")
@@ -802,18 +811,18 @@ def save_probing_results(
             json.dump(json_results, f, indent=2)
 
     elif probe_type == 'mlp':
-        # Extract layer results
-        layer_results = probing_results['layer_results']
+        # Extract layer results (now using dataclass)
+        layer_results = probing_results.layer_results
 
         # Create DataFrame
         results_list = []
         for layer_info in layer_results:
             results_list.append({
-                'layer': layer_info['layer'],
-                'accuracy': layer_info['accuracy'],
-                'mcc_score': layer_info['mcc_score'],  # Matthews Correlation Coefficient (primary metric)
-                'spearman_r': layer_info['spearman_r'],  # Kept for comparison
-                'p_value': layer_info['p_value']
+                'layer': layer_info.layer,
+                'accuracy': layer_info.val_score,  # val_score is the accuracy
+                'mcc_score': layer_info.mcc_score,  # Matthews Correlation Coefficient (primary metric)
+                'spearman_r': layer_info.spearman_r,  # Kept for comparison
+                'p_value': layer_info.spearman_p
             })
 
         df = pd.DataFrame(results_list)
@@ -1031,13 +1040,13 @@ def plot_spearman_correlations(
         print(f"  Saved Spearman plot to: {spearman_fig_path}")
 
     elif probe_type == 'mlp':
-        layer_results = probing_results['layer_results']
+        layer_results = probing_results.layer_results
 
         # Extract data
-        layers = [l['layer'] for l in layer_results]
-        mcc_scores = [l['mcc_score'] for l in layer_results]
-        spearman_rs = [l['spearman_r'] for l in layer_results]
-        accuracies = [l['accuracy'] for l in layer_results]
+        layers = [l.layer for l in layer_results]
+        mcc_scores = [l.mcc_score for l in layer_results]
+        spearman_rs = [l.spearman_r for l in layer_results]
+        accuracies = [l.val_score for l in layer_results]
 
         # Create figure
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -1446,113 +1455,6 @@ def run_extraction_phase(args):
 # ============================================================================
 # PHASE 2: K-FOLD INTERVENTION
 # ============================================================================
-
-def probe_mlp_layers(
-    activations: torch.Tensor,
-    labels: np.ndarray,
-    num_layers: int,
-    ridge_alpha: float,
-    confounder_features: np.ndarray = None
-):
-    """
-    Probe MLP layers for classification.
-
-    Supports multivariate regression with confounder control:
-    If confounder_features provided, each layer is probed while controlling
-    for other demographics, isolating layer-specific effects.
-
-    Args:
-        activations: MLP layer activations, shape (n_samples, n_layers, hidden_dim)
-        labels: Target demographic labels, shape (n_samples,)
-        num_layers: Number of MLP layers
-        ridge_alpha: Ridge regression regularization parameter
-        confounder_features: Optional shape (n_samples, n_confounders)
-                            One-hot encoded demographic confounders
-
-    Returns:
-        Dict with layer_results sorted by MCC score
-    """
-    from sklearn.linear_model import RidgeClassifier
-    from sklearn.model_selection import cross_val_score
-    from sklearn.metrics import matthews_corrcoef
-    from scipy.stats import spearmanr
-
-    layer_results = []
-
-    for layer in range(num_layers):
-        layer_act = activations[:, layer, :].numpy()
-
-        # Concatenate layer activations with confounders if provided
-        if confounder_features is not None:
-            combined_features = np.hstack([layer_act, confounder_features])
-        else:
-            combined_features = layer_act
-
-        clf = RidgeClassifier(alpha=ridge_alpha, random_state=42)
-
-        # Train and evaluate on combined features (layer + confounders)
-        scores = cross_val_score(clf, combined_features, labels, cv=2, scoring='accuracy')
-        clf.fit(combined_features, labels)
-        predictions = clf.predict(combined_features)
-        spearman_r, p_value = spearmanr(labels, predictions)
-
-        # Calculate Matthews Correlation Coefficient (MCC) for better discrimination
-        mcc_score = matthews_corrcoef(labels, predictions)
-
-        # Extract coefficients for layer features only (not confounders)
-        coef = clf.coef_ if hasattr(clf, 'coef_') else None
-        if coef is not None and confounder_features is not None:
-            # Slice off confounder coefficients, keep only layer coefficients
-            layer_dim = layer_act.shape[1]
-            if coef.ndim == 2:  # Multi-class
-                coef = coef[:, :layer_dim]
-            else:  # Binary
-                coef = coef[:layer_dim]
-
-        layer_results.append({
-            'layer': layer,
-            'accuracy': scores.mean(),
-            'spearman_r': spearman_r,
-            'mcc_score': mcc_score,
-            'p_value': p_value,
-            'coefficients': coef
-        })
-
-    # Rank layers by MCC (provides better separation than Spearman)
-    layer_results = sorted(layer_results, key=lambda x: abs(x['mcc_score']), reverse=True)
-    return {'layer_results': layer_results}
-
-
-def extract_mlp_intervention_weights(results, top_k=10):
-    """Extract intervention weights from MLP probing results"""
-    layer_results = results['layer_results'][:top_k]
-    intervention_weights = {}
-
-    for result in layer_results:
-        layer = result['layer']
-        coef = result['coefficients']
-
-        # For multiclass: coef is [n_classes, n_features]
-        # For binary: coef is [n_features] or [1, n_features]
-        # Ensure binary case is 1D
-        if coef is not None and coef.ndim > 1 and coef.shape[0] == 1:
-            coef = coef[0]
-
-        # Compute std (for multiclass, compute per-class then average)
-        if coef is not None:
-            if coef.ndim > 1:
-                std = np.mean([np.std(coef[i]) for i in range(coef.shape[0])])
-            else:
-                std = np.std(coef)
-        else:
-            std = 0.0
-
-        intercept = 0.0
-        # Store full coefficient matrix (1D for binary, 2D for multiclass)
-        intervention_weights[layer] = (coef, intercept, std)
-
-    return intervention_weights
-
 
 def train_weights_on_prefiltered_activations(
     activations,

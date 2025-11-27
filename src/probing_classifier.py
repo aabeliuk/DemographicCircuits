@@ -47,6 +47,30 @@ class CircuitProbingResults:
     task_type: Literal['regression', 'classification']
 
 
+@dataclass
+class MLPLayerProbingResult:
+    """Results from probing a single MLP layer"""
+    layer: int
+    train_score: float
+    val_score: float
+    spearman_r: float
+    spearman_p: float
+    mcc_score: float  # Matthews Correlation Coefficient (primary selection metric)
+    ridge_coef: np.ndarray
+    ridge_intercept: float
+    feature_std: float  # Standard deviation of training features
+
+
+@dataclass
+class MLPLayerProbingResults:
+    """Complete results from probing all MLP layers"""
+    layer_results: List[MLPLayerProbingResult]
+    top_k_layers: List[int]  # Layer indices
+    top_k_scores: List[float]  # MCC scores
+    num_layers_probed: int
+    task_type: Literal['regression', 'classification']
+
+
 class AttentionHeadProber:
     """
     Trains linear probes on attention head outputs to predict political attitudes.
@@ -416,3 +440,226 @@ def compare_direct_vs_probing(
         'rank_p_value': rank_p,
         'common_heads': overlap
     }
+
+
+class MLPLayerProber:
+    """
+    Trains linear probes on MLP layer outputs to predict political attitudes.
+
+    Mirrors AttentionHeadProber architecture for consistency.
+    """
+
+    def __init__(
+        self,
+        num_layers: int,
+        hidden_dim: int,
+        alpha: float = 1.0,
+        n_folds: int = 2,
+        task_type: Literal['regression', 'classification'] = 'classification',
+        random_state: int = 42
+    ):
+        """
+        Args:
+            num_layers: Number of transformer layers
+            hidden_dim: Dimension of MLP layer activations
+            alpha: Ridge regression regularization parameter
+            n_folds: Number of cross-validation folds
+            task_type: 'regression' for continuous targets, 'classification' for binary
+            random_state: Random seed for reproducibility
+        """
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+        self.alpha = alpha
+        self.n_folds = n_folds
+        self.task_type = task_type
+        self.random_state = random_state
+
+    def probe_single_layer(
+        self,
+        layer_features: np.ndarray,
+        targets: np.ndarray,
+        layer: int,
+        confounder_features: np.ndarray = None
+    ) -> MLPLayerProbingResult:
+        """
+        Train and evaluate a linear probe for a single MLP layer.
+
+        Supports multivariate regression with confounder control:
+        If confounder_features provided, trains Ridge on [layer_features | confounders],
+        isolating the unique contribution of this layer to predicting the target.
+
+        Args:
+            layer_features: Shape (n_samples, hidden_dim)
+            targets: Shape (n_samples,) - continuous or binary
+            layer: Layer index
+            confounder_features: Optional shape (n_samples, n_confounders)
+                                One-hot encoded demographic confounders
+
+        Returns:
+            MLPLayerProbingResult with cross-validation metrics
+        """
+        n_samples = layer_features.shape[0]
+
+        # Concatenate layer features with confounders if provided
+        if confounder_features is not None:
+            combined_features = np.hstack([layer_features, confounder_features])
+        else:
+            combined_features = layer_features
+
+        # Choose model based on task type
+        if self.task_type == 'regression':
+            model_class = Ridge
+        else:
+            model_class = RidgeClassifier
+
+        # Cross-validation
+        kf = KFold(n_splits=self.n_folds, shuffle=True, random_state=self.random_state)
+        train_scores = []
+        val_scores = []
+        val_predictions = np.zeros(n_samples)
+        val_indices = []
+
+        for train_idx, val_idx in kf.split(combined_features):
+            X_train, X_val = combined_features[train_idx], combined_features[val_idx]
+            y_train, y_val = targets[train_idx], targets[val_idx]
+
+            # Train ridge model
+            model = model_class(alpha=self.alpha, random_state=self.random_state)
+            model.fit(X_train, y_train)
+
+            # Evaluate
+            train_scores.append(model.score(X_train, y_train))
+            val_scores.append(model.score(X_val, y_val))
+
+            # Store predictions for correlation metrics
+            if self.task_type == 'regression':
+                val_predictions[val_idx] = model.predict(X_val)
+            else:
+                val_predictions[val_idx] = model.predict(X_val)
+
+            val_indices.extend(val_idx)
+
+        # Calculate Spearman correlation on all validation predictions
+        spearman_r, spearman_p = spearmanr(targets[val_indices], val_predictions[val_indices])
+
+        # Calculate Matthews Correlation Coefficient (MCC)
+        mcc_score = matthews_corrcoef(targets[val_indices], val_predictions[val_indices])
+
+        # Train final model on all data for coefficient extraction
+        final_model = model_class(alpha=self.alpha, random_state=self.random_state)
+        final_model.fit(combined_features, targets)
+
+        # Extract coefficients for LAYER FEATURES only (not confounders)
+        if hasattr(final_model, 'coef_'):
+            ridge_coef = final_model.coef_
+            if ridge_coef.ndim == 2:  # For multi-class, take first class
+                ridge_coef = ridge_coef[0]
+
+            # Extract only coefficients for layer features (first hidden_dim features)
+            ridge_coef = ridge_coef[:self.hidden_dim]
+        else:
+            ridge_coef = np.zeros(self.hidden_dim)
+
+        ridge_intercept = final_model.intercept_ if hasattr(final_model, 'intercept_') else 0.0
+        if isinstance(ridge_intercept, np.ndarray):
+            ridge_intercept = ridge_intercept[0]
+
+        # Calculate feature standard deviation for intervention scaling
+        feature_std = np.std(layer_features)
+
+        return MLPLayerProbingResult(
+            layer=layer,
+            train_score=np.mean(train_scores),
+            val_score=np.mean(val_scores),
+            spearman_r=spearman_r,
+            spearman_p=spearman_p,
+            mcc_score=mcc_score,
+            ridge_coef=ridge_coef,
+            ridge_intercept=ridge_intercept,
+            feature_std=feature_std
+        )
+
+    def probe_all_layers(
+        self,
+        activations: torch.Tensor,
+        targets: np.ndarray,
+        confounder_features: np.ndarray = None
+    ) -> MLPLayerProbingResults:
+        """
+        Probe all MLP layers.
+
+        Supports multivariate regression with confounder control:
+        If confounder_features provided, each layer is probed while controlling
+        for other demographics, isolating layer-specific effects.
+
+        Args:
+            activations: Shape (n_samples, n_layers, hidden_dim)
+            targets: Shape (n_samples,) - political attitude labels/scores
+            confounder_features: Optional shape (n_samples, n_confounders)
+                                One-hot encoded demographic confounders
+
+        Returns:
+            MLPLayerProbingResults with all layer results and top-k ranking
+        """
+        # Convert to numpy
+        if isinstance(activations, torch.Tensor):
+            activations = activations.cpu().numpy()
+
+        n_samples, n_layers, hidden_dim = activations.shape
+        assert n_layers == self.num_layers
+        assert hidden_dim == self.hidden_dim
+
+        # Probe each layer
+        layer_results = []
+        for layer in range(n_layers):
+            # Extract features for this layer
+            layer_features = activations[:, layer, :]  # Shape: (n_samples, hidden_dim)
+
+            # Probe this layer (with confounders if provided)
+            result = self.probe_single_layer(
+                layer_features, targets, layer,
+                confounder_features=confounder_features
+            )
+            layer_results.append(result)
+
+        # Rank layers by Matthews Correlation Coefficient (absolute value)
+        layer_results.sort(key=lambda x: abs(x.mcc_score), reverse=True)
+
+        # Extract top-k layers
+        top_k_layers = [r.layer for r in layer_results]
+        top_k_scores = [r.mcc_score for r in layer_results]
+
+        return MLPLayerProbingResults(
+            layer_results=layer_results,
+            top_k_layers=top_k_layers,
+            top_k_scores=top_k_scores,
+            num_layers_probed=len(layer_results),
+            task_type=self.task_type
+        )
+
+    def get_intervention_weights(
+        self,
+        results: MLPLayerProbingResults,
+        top_k: int = 10
+    ) -> Dict[int, Tuple[np.ndarray, float, float]]:
+        """
+        Extract intervention weights for top-k layers.
+
+        Args:
+            results: MLPLayerProbingResults from probe_all_layers
+            top_k: Number of top layers to return
+
+        Returns:
+            Dictionary mapping layer_index -> (ridge_coef, intercept, feature_std)
+        """
+        intervention_weights = {}
+
+        for result in results.layer_results[:top_k]:
+            layer = result.layer
+            intervention_weights[layer] = (
+                result.ridge_coef,
+                result.ridge_intercept,
+                result.feature_std
+            )
+
+        return intervention_weights
