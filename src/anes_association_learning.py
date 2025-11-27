@@ -140,7 +140,7 @@ ANES_2024_VARIABLES = {
 
     # Political Identity
     'ideology': {
-        'code': 'V241709',
+        'code': 'V241177',
         'label': 'Political Ideology',
         'values': {
             1: 'Extremely liberal', 2: 'Liberal', 3: 'Slightly liberal',
