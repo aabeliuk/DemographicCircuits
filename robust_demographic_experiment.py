@@ -562,18 +562,18 @@ def extract_activations_for_question(
 
     if probe_type == 'attention':
         all_activations = extract_full_activations_baukit(
-            model, tokenizer, all_prompts, device, aggregation='mean'
+            model, tokenizer, all_prompts, device, aggregation='last'
         )
     elif probe_type == 'mlp':
         all_activations = extract_mlp_activations_baukit(
-            model, tokenizer, all_prompts, device, aggregation='mean'
+            model, tokenizer, all_prompts, device, aggregation='last'
         )
     elif probe_type == 'both':
         attn_activations = extract_full_activations_baukit(
-            model, tokenizer, all_prompts, device, aggregation='mean'
+            model, tokenizer, all_prompts, device, aggregation='last'
         )
         mlp_activations = extract_mlp_activations_baukit(
-            model, tokenizer, all_prompts, device, aggregation='mean'
+            model, tokenizer, all_prompts, device, aggregation='last'
         )
         all_activations = (attn_activations, mlp_activations)
     else:
