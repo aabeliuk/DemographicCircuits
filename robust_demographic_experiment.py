@@ -632,7 +632,19 @@ def encode_confounder_features(
 
     # Check for missing values and fill with 'Unknown'
     if confounder_df.isnull().any().any():
-        print(f"Warning: Missing values found in confounders. Filling with 'Unknown'.")
+        n_samples = len(confounder_df)
+        total_missing = confounder_df.isnull().sum().sum()
+
+        print(f"  Warning: {total_missing} missing values found in confounders (out of {n_samples * len(confounder_names)} total entries)")
+        print(f"  Missing values per confounder:")
+
+        for col in confounder_df.columns:
+            missing_count = confounder_df[col].isnull().sum()
+            if missing_count > 0:
+                missing_pct = (missing_count / n_samples) * 100
+                print(f"    - {col}: {missing_count}/{n_samples} ({missing_pct:.1f}%)")
+
+        print(f"  Filling all missing values with 'Unknown'")
         confounder_df = confounder_df.fillna('Unknown')
         # Also convert 'nan' strings to 'Unknown' (from categorical conversion)
         confounder_df = confounder_df.replace('nan', 'Unknown')
