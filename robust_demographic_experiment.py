@@ -100,15 +100,15 @@ DEFAULT_EVAL_SAMPLE_SIZE = 50
 # For each target demographic, specify which other demographics to control for
 # This enables multivariate regression that isolates the unique contribution of each demographic
 DEMOGRAPHIC_CONFOUNDERS = {
-    'ideology': ['age', 'gender', 'education', 'race'],
-    'age': ['ideology', 'gender', 'education', 'race'],
-    'gender': ['age', 'ideology', 'education', 'race'],
-    'education': ['age', 'gender', 'ideology', 'race'],
-    'race': ['age', 'gender', 'ideology', 'education'],
-    'marital_status': ['age', 'gender', 'ideology', 'education'],
-    'income': ['age', 'gender', 'education', 'ideology'],
-    'religion': ['age', 'gender', 'ideology', 'education'],
-    'urban_rural': ['age', 'gender', 'ideology', 'education'],
+    'ideology': ['age', 'gender', 'education', 'race', 'marital_status', 'income', 'religion'],
+    'age': ['ideology', 'gender', 'education', 'race', 'marital_status', 'income', 'religion'],
+    'gender': ['age', 'ideology', 'education', 'race', 'marital_status', 'income', 'religion'],
+    'education': ['age', 'gender', 'ideology', 'race', 'marital_status', 'income', 'religion'],
+    'race': ['age', 'gender', 'ideology', 'education', 'marital_status', 'income', 'religion'],
+    'marital_status': ['age', 'gender', 'ideology', 'education', 'race', 'income', 'religion'],
+    'income': ['age', 'gender', 'education', 'ideology','race', 'marital_status', 'religion'],
+    'religion': ['age', 'gender', 'ideology', 'education', 'race', 'marital_status', 'income'],
+    'urban_rural': ['age', 'gender', 'ideology', 'education',  'race', 'marital_status', 'income'],
 }
 
 # Available demographics and political questions
@@ -718,7 +718,7 @@ def probe_and_select_top_components(
 
         probing_results = prober.probe_all_heads(
             activations, labels,
-            aggregation='last_token',
+            aggregation='mean',
             confounder_features=confounder_features
         )
         intervention_weights = prober.get_intervention_weights(probing_results, top_k=top_k)
