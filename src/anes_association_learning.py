@@ -183,7 +183,8 @@ ANES_2024_VARIABLES = {
             8: 'Hindu',
             9: 'Atheist',
             10: 'Agnostic',
-            11: 'Something else'
+            11: 'Something else',
+            12: 'Nothing in particular'
         }
     },
 
