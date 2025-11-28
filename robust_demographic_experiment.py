@@ -2010,6 +2010,158 @@ def combine_demographic_weights(
     return combined_weights
 
 
+def build_test_results_dict(
+    baseline_acc: float,
+    intervention_acc: float,
+    improvement: float,
+    kendall_metrics: Dict[str, Optional[float]],
+    baseline_advanced: Dict[str, Optional[float]],
+    intervention_advanced: Dict[str, Optional[float]],
+    n_samples: int
+) -> Dict[str, any]:
+    """
+    Build standardized test results dictionary with all metrics.
+
+    This helper function eliminates ~60 lines of code duplication by centralizing
+    the result dictionary construction used in both single and intersectional
+    intervention evaluation.
+
+    Args:
+        baseline_acc: Baseline accuracy score
+        intervention_acc: Intervention accuracy score
+        improvement: Accuracy improvement (intervention - baseline) * 100
+        kendall_metrics: Dictionary from compute_kendall_tau_metrics()
+        baseline_advanced: Advanced metrics dict from compute_advanced_metrics() for baseline
+        intervention_advanced: Advanced metrics dict from compute_advanced_metrics() for intervention
+        n_samples: Number of test samples
+
+    Returns:
+        Dictionary with all test result metrics including accuracy, Kendall's tau,
+        and all advanced metrics (entropy, gini, js_divergence, etc.)
+    """
+    # Calculate improvements for advanced metrics
+    improvements = {}
+    for key in baseline_advanced.keys():
+        if baseline_advanced[key] is not None and intervention_advanced[key] is not None:
+            # For divergence metrics (lower is better), improvement is negative delta
+            if key in ['js_divergence', 'total_variation']:
+                improvements[f'{key}_improvement'] = baseline_advanced[key] - intervention_advanced[key]
+            else:
+                # For other metrics (higher is better), improvement is positive delta
+                improvements[f'{key}_improvement'] = intervention_advanced[key] - baseline_advanced[key]
+        else:
+            improvements[f'{key}_improvement'] = None
+
+    return {
+        'baseline_accuracy': baseline_acc,
+        'intervention_accuracy': intervention_acc,
+        'improvement': improvement,
+        'baseline_kendall_tau': kendall_metrics['baseline_kendall_tau'],
+        'baseline_kendall_p': kendall_metrics['baseline_kendall_p'],
+        'intervention_kendall_tau': kendall_metrics['intervention_kendall_tau'],
+        'intervention_kendall_p': kendall_metrics['intervention_kendall_p'],
+        'kendall_improvement': kendall_metrics['kendall_improvement'],
+        # Advanced baseline metrics
+        'baseline_entropy': baseline_advanced['entropy'],
+        'baseline_gini_diversity': baseline_advanced['gini_diversity'],
+        'baseline_js_divergence': baseline_advanced['js_divergence'],
+        'baseline_total_variation': baseline_advanced['total_variation'],
+        'baseline_macro_f1': baseline_advanced['macro_f1'],
+        'baseline_balanced_accuracy': baseline_advanced['balanced_accuracy'],
+        'baseline_cohen_kappa': baseline_advanced['cohen_kappa'],
+        'baseline_dist_quality_score': baseline_advanced['dist_quality_score'],
+        # Advanced intervention metrics
+        'intervention_entropy': intervention_advanced['entropy'],
+        'intervention_gini_diversity': intervention_advanced['gini_diversity'],
+        'intervention_js_divergence': intervention_advanced['js_divergence'],
+        'intervention_total_variation': intervention_advanced['total_variation'],
+        'intervention_macro_f1': intervention_advanced['macro_f1'],
+        'intervention_balanced_accuracy': intervention_advanced['balanced_accuracy'],
+        'intervention_cohen_kappa': intervention_advanced['cohen_kappa'],
+        'intervention_dist_quality_score': intervention_advanced['dist_quality_score'],
+        # Improvements
+        **improvements,
+        'n_samples': n_samples
+    }
+
+
+def compute_kendall_tau_metrics(
+    true_labels: List[str],
+    baseline_predictions: List[str],
+    intervention_predictions: List[str],
+    label_to_rank: Dict[str, int]
+) -> Dict[str, Optional[float]]:
+    """
+    Compute Kendall's tau correlation for baseline and intervention predictions.
+
+    This helper function eliminates ~80 lines of code duplication by centralizing
+    the Kendall tau computation logic used in both single and intersectional
+    intervention evaluation.
+
+    Args:
+        true_labels: Ground truth labels
+        baseline_predictions: Predictions without intervention
+        intervention_predictions: Predictions with intervention
+        label_to_rank: Mapping from label strings to numeric ranks for ordinal correlation
+
+    Returns:
+        Dictionary with keys:
+        - baseline_kendall_tau: Kendall tau for baseline (or None)
+        - baseline_kendall_p: P-value for baseline (or None)
+        - intervention_kendall_tau: Kendall tau for intervention (or None)
+        - intervention_kendall_p: P-value for intervention (or None)
+        - kendall_improvement: Difference (intervention - baseline) (or None)
+    """
+    try:
+        # Convert string labels to numeric ranks for proper ordinal correlation
+        true_ranks = [label_to_rank.get(label, -1) for label in true_labels]
+        baseline_ranks = [label_to_rank.get(label, -1) for label in baseline_predictions]
+        intervention_ranks = [label_to_rank.get(label, -1) for label in intervention_predictions]
+
+        # Filter valid pairs (exclude any -1 ranks from missing labels)
+        baseline_valid_pairs = [(t, b) for t, b in zip(true_ranks, baseline_ranks) if t != -1 and b != -1]
+        intervention_valid_pairs = [(t, i) for t, i in zip(true_ranks, intervention_ranks) if t != -1 and i != -1]
+
+        # Compute Kendall's tau on numeric ranks
+        if len(baseline_valid_pairs) > 1:
+            true_b, pred_b = zip(*baseline_valid_pairs)
+            baseline_kendall, baseline_kendall_p = kendalltau(true_b, pred_b)
+        else:
+            baseline_kendall = baseline_kendall_p = None
+
+        if len(intervention_valid_pairs) > 1:
+            true_i, pred_i = zip(*intervention_valid_pairs)
+            intervention_kendall, intervention_kendall_p = kendalltau(true_i, pred_i)
+        else:
+            intervention_kendall = intervention_kendall_p = None
+
+        # Handle NaN values (occurs when all predictions are identical)
+        if baseline_kendall is not None and np.isnan(baseline_kendall):
+            baseline_kendall = baseline_kendall_p = None
+        if intervention_kendall is not None and np.isnan(intervention_kendall):
+            intervention_kendall = intervention_kendall_p = None
+
+        # Calculate improvement only if both are valid
+        if baseline_kendall is not None and intervention_kendall is not None:
+            kendall_improvement = intervention_kendall - baseline_kendall
+        else:
+            kendall_improvement = None
+
+    except (ValueError, TypeError):
+        # Handle non-numeric or non-comparable data
+        baseline_kendall = baseline_kendall_p = None
+        intervention_kendall = intervention_kendall_p = None
+        kendall_improvement = None
+
+    return {
+        'baseline_kendall_tau': baseline_kendall,
+        'baseline_kendall_p': baseline_kendall_p,
+        'intervention_kendall_tau': intervention_kendall,
+        'intervention_kendall_p': intervention_kendall_p,
+        'kendall_improvement': kendall_improvement
+    }
+
+
 def evaluate_intervention_on_fold(
     model,
     tokenizer,
@@ -2236,65 +2388,19 @@ def evaluate_intervention_on_fold(
         intervention_acc = accuracy_score(true_labels, intervention_predictions)
         improvement = (intervention_acc - baseline_acc) * 100
 
-        # Calculate Kendall's tau for ordinal variables
-        # This measures how well predictions preserve the ordinal ranking
-        try:
-            # Convert string labels to numeric ranks for proper ordinal correlation
-            true_ranks = [label_to_rank.get(label, -1) for label in true_labels]
-            baseline_ranks = [label_to_rank.get(label, -1) for label in baseline_predictions]
-            intervention_ranks = [label_to_rank.get(label, -1) for label in intervention_predictions]
-
-            # Filter valid pairs (exclude any -1 ranks from missing labels)
-            baseline_valid_pairs = [(t, b) for t, b in zip(true_ranks, baseline_ranks) if t != -1 and b != -1]
-            intervention_valid_pairs = [(t, i) for t, i in zip(true_ranks, intervention_ranks) if t != -1 and i != -1]
-
-            # Compute Kendall's tau on numeric ranks
-            if len(baseline_valid_pairs) > 1:
-                true_b, pred_b = zip(*baseline_valid_pairs)
-                baseline_kendall, baseline_kendall_p = kendalltau(true_b, pred_b)
-            else:
-                baseline_kendall = baseline_kendall_p = None
-
-            if len(intervention_valid_pairs) > 1:
-                true_i, pred_i = zip(*intervention_valid_pairs)
-                intervention_kendall, intervention_kendall_p = kendalltau(true_i, pred_i)
-            else:
-                intervention_kendall = intervention_kendall_p = None
-
-            # Handle NaN values (occurs when all predictions are identical)
-            if baseline_kendall is not None and np.isnan(baseline_kendall):
-                baseline_kendall = baseline_kendall_p = None
-            if intervention_kendall is not None and np.isnan(intervention_kendall):
-                intervention_kendall = intervention_kendall_p = None
-
-            # Calculate improvement only if both are valid
-            if baseline_kendall is not None and intervention_kendall is not None:
-                kendall_improvement = intervention_kendall - baseline_kendall
-            else:
-                kendall_improvement = None
-
-        except (ValueError, TypeError):
-            # Handle non-numeric or non-comparable data
-            baseline_kendall = baseline_kendall_p = None
-            intervention_kendall = intervention_kendall_p = None
-            kendall_improvement = None
+        # Calculate Kendall's tau for ordinal variables using helper function
+        kendall_metrics = compute_kendall_tau_metrics(
+            true_labels, baseline_predictions, intervention_predictions, label_to_rank
+        )
+        baseline_kendall = kendall_metrics['baseline_kendall_tau']
+        baseline_kendall_p = kendall_metrics['baseline_kendall_p']
+        intervention_kendall = kendall_metrics['intervention_kendall_tau']
+        intervention_kendall_p = kendall_metrics['intervention_kendall_p']
+        kendall_improvement = kendall_metrics['kendall_improvement']
 
         # Calculate advanced metrics (diversity and distributional quality)
         baseline_advanced = compute_advanced_metrics(true_labels, baseline_predictions)
         intervention_advanced = compute_advanced_metrics(true_labels, intervention_predictions)
-
-        # Calculate improvements for key metrics
-        improvements = {}
-        for key in baseline_advanced.keys():
-            if baseline_advanced[key] is not None and intervention_advanced[key] is not None:
-                # For divergence metrics (lower is better), improvement is negative delta
-                if key in ['js_divergence', 'total_variation']:
-                    improvements[f'{key}_improvement'] = baseline_advanced[key] - intervention_advanced[key]
-                else:
-                    # For other metrics (higher is better), improvement is positive delta
-                    improvements[f'{key}_improvement'] = intervention_advanced[key] - baseline_advanced[key]
-            else:
-                improvements[f'{key}_improvement'] = None
 
         # Create predictions DataFrame for CSV export
         predictions_df = pd.DataFrame(user_details)
@@ -2313,37 +2419,12 @@ def evaluate_intervention_on_fold(
             predictions_df.to_csv(csv_path, index=False)
             print(f"      Saved predictions to {csv_path}")
 
-        test_results[question] = {
-            'baseline_accuracy': baseline_acc,
-            'intervention_accuracy': intervention_acc,
-            'improvement': improvement,
-            'baseline_kendall_tau': baseline_kendall,
-            'baseline_kendall_p': baseline_kendall_p,
-            'intervention_kendall_tau': intervention_kendall,
-            'intervention_kendall_p': intervention_kendall_p,
-            'kendall_improvement': kendall_improvement,
-            # Advanced baseline metrics
-            'baseline_entropy': baseline_advanced['entropy'],
-            'baseline_gini_diversity': baseline_advanced['gini_diversity'],
-            'baseline_js_divergence': baseline_advanced['js_divergence'],
-            'baseline_total_variation': baseline_advanced['total_variation'],
-            'baseline_macro_f1': baseline_advanced['macro_f1'],
-            'baseline_balanced_accuracy': baseline_advanced['balanced_accuracy'],
-            'baseline_cohen_kappa': baseline_advanced['cohen_kappa'],
-            'baseline_dist_quality_score': baseline_advanced['dist_quality_score'],
-            # Advanced intervention metrics
-            'intervention_entropy': intervention_advanced['entropy'],
-            'intervention_gini_diversity': intervention_advanced['gini_diversity'],
-            'intervention_js_divergence': intervention_advanced['js_divergence'],
-            'intervention_total_variation': intervention_advanced['total_variation'],
-            'intervention_macro_f1': intervention_advanced['macro_f1'],
-            'intervention_balanced_accuracy': intervention_advanced['balanced_accuracy'],
-            'intervention_cohen_kappa': intervention_advanced['cohen_kappa'],
-            'intervention_dist_quality_score': intervention_advanced['dist_quality_score'],
-            # Improvements
-            **improvements,
-            'n_samples': len(test_users)
-        }
+        # Build test results dictionary using helper function
+        test_results[question] = build_test_results_dict(
+            baseline_acc, intervention_acc, improvement,
+            kendall_metrics, baseline_advanced, intervention_advanced,
+            len(test_users)
+        )
 
     return test_results
 
@@ -2559,62 +2640,19 @@ def evaluate_intersectional_intervention_on_fold(
         intervention_acc = accuracy_score(true_labels, intervention_predictions)
         improvement = (intervention_acc - baseline_acc) * 100
 
-        # Calculate Kendall's tau for ordinal variables
-        # This measures how well predictions preserve the ordinal ranking
-        try:
-            # Convert string labels to numeric ranks for proper ordinal correlation
-            true_ranks = [label_to_rank.get(label, -1) for label in true_labels]
-            baseline_ranks = [label_to_rank.get(label, -1) for label in baseline_predictions]
-            intervention_ranks = [label_to_rank.get(label, -1) for label in intervention_predictions]
-
-            # Filter valid pairs (exclude any -1 ranks from missing labels)
-            baseline_valid_pairs = [(t, b) for t, b in zip(true_ranks, baseline_ranks) if t != -1 and b != -1]
-            intervention_valid_pairs = [(t, i) for t, i in zip(true_ranks, intervention_ranks) if t != -1 and i != -1]
-
-            # Compute Kendall's tau on numeric ranks
-            if len(baseline_valid_pairs) > 1:
-                true_b, pred_b = zip(*baseline_valid_pairs)
-                baseline_kendall, baseline_kendall_p = kendalltau(true_b, pred_b)
-            else:
-                baseline_kendall = baseline_kendall_p = None
-
-            if len(intervention_valid_pairs) > 1:
-                true_i, pred_i = zip(*intervention_valid_pairs)
-                intervention_kendall, intervention_kendall_p = kendalltau(true_i, pred_i)
-            else:
-                intervention_kendall = intervention_kendall_p = None
-
-            # Handle NaN values (occurs when all predictions are identical)
-            if baseline_kendall is not None and np.isnan(baseline_kendall):
-                baseline_kendall = baseline_kendall_p = None
-            if intervention_kendall is not None and np.isnan(intervention_kendall):
-                intervention_kendall = intervention_kendall_p = None
-
-            # Calculate improvement only if both are valid
-            if baseline_kendall is not None and intervention_kendall is not None:
-                kendall_improvement = intervention_kendall - baseline_kendall
-            else:
-                kendall_improvement = None
-        except Exception as e:
-            print(f"      Warning: Could not compute Kendall's tau: {e}")
-            baseline_kendall = baseline_kendall_p = None
-            intervention_kendall = intervention_kendall_p = None
-            kendall_improvement = None
+        # Calculate Kendall's tau for ordinal variables using helper function
+        kendall_metrics = compute_kendall_tau_metrics(
+            true_labels, baseline_predictions, intervention_predictions, label_to_rank
+        )
+        baseline_kendall = kendall_metrics['baseline_kendall_tau']
+        baseline_kendall_p = kendall_metrics['baseline_kendall_p']
+        intervention_kendall = kendall_metrics['intervention_kendall_tau']
+        intervention_kendall_p = kendall_metrics['intervention_kendall_p']
+        kendall_improvement = kendall_metrics['kendall_improvement']
 
         # Calculate advanced metrics
         baseline_advanced = compute_advanced_metrics(true_labels, baseline_predictions)
         intervention_advanced = compute_advanced_metrics(true_labels, intervention_predictions)
-
-        # Calculate improvements for key metrics
-        improvements = {}
-        for key in baseline_advanced.keys():
-            if baseline_advanced[key] is not None and intervention_advanced[key] is not None:
-                if key in ['js_divergence', 'total_variation']:
-                    improvements[f'{key}_improvement'] = baseline_advanced[key] - intervention_advanced[key]
-                else:
-                    improvements[f'{key}_improvement'] = intervention_advanced[key] - baseline_advanced[key]
-            else:
-                improvements[f'{key}_improvement'] = None
 
         # Create predictions DataFrame for CSV export
         predictions_df = pd.DataFrame(user_details)
@@ -2637,36 +2675,13 @@ def evaluate_intersectional_intervention_on_fold(
         unique_combos = len(set(demographic_combinations))
         combo_dist = Counter(demographic_combinations)
 
+        # Build test results dictionary using helper function and add intersectional metadata
         test_results[question] = {
-            'baseline_accuracy': baseline_acc,
-            'intervention_accuracy': intervention_acc,
-            'improvement': improvement,
-            'baseline_kendall_tau': baseline_kendall,
-            'baseline_kendall_p': baseline_kendall_p,
-            'intervention_kendall_tau': intervention_kendall,
-            'intervention_kendall_p': intervention_kendall_p,
-            'kendall_improvement': kendall_improvement,
-            # Advanced baseline metrics
-            'baseline_entropy': baseline_advanced['entropy'],
-            'baseline_gini_diversity': baseline_advanced['gini_diversity'],
-            'baseline_js_divergence': baseline_advanced['js_divergence'],
-            'baseline_total_variation': baseline_advanced['total_variation'],
-            'baseline_macro_f1': baseline_advanced['macro_f1'],
-            'baseline_balanced_accuracy': baseline_advanced['balanced_accuracy'],
-            'baseline_cohen_kappa': baseline_advanced['cohen_kappa'],
-            'baseline_dist_quality_score': baseline_advanced['dist_quality_score'],
-            # Advanced intervention metrics
-            'intervention_entropy': intervention_advanced['entropy'],
-            'intervention_gini_diversity': intervention_advanced['gini_diversity'],
-            'intervention_js_divergence': intervention_advanced['js_divergence'],
-            'intervention_total_variation': intervention_advanced['total_variation'],
-            'intervention_macro_f1': intervention_advanced['macro_f1'],
-            'intervention_balanced_accuracy': intervention_advanced['balanced_accuracy'],
-            'intervention_cohen_kappa': intervention_advanced['cohen_kappa'],
-            'intervention_dist_quality_score': intervention_advanced['dist_quality_score'],
-            # Improvements
-            **improvements,
-            'n_samples': len(test_users),
+            **build_test_results_dict(
+                baseline_acc, intervention_acc, improvement,
+                kendall_metrics, baseline_advanced, intervention_advanced,
+                len(test_users)
+            ),
             # Intersectional-specific metadata
             'demographics_combined': demographic_attrs,
             'n_unique_combinations': unique_combos,
