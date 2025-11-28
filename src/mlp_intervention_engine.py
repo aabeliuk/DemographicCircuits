@@ -156,7 +156,9 @@ class MLPInterventionEngine:
         """
         # Normalize ridge coefficient (direction only)
         ridge_coef_normalized = ridge_coef / (np.linalg.norm(ridge_coef) + 1e-8)
-        ridge_coef_tensor = torch.from_numpy(ridge_coef_normalized).float().to(self.device)
+        # Match model dtype (float16 or float32)
+        model_dtype = next(self.model.parameters()).dtype
+        ridge_coef_tensor = torch.from_numpy(ridge_coef_normalized).to(dtype=model_dtype, device=self.device)
 
         # Determine intervention direction
         if config.intervention_direction == 'minimize':
