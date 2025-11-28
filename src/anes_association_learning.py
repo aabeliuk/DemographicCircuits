@@ -173,13 +173,17 @@ ANES_2024_VARIABLES = {
         'code': 'V241422',
         'label': 'Religious Affiliation',
         'values': {
-            1: 'Protestant', 2: 'Catholic', 3: 'Jewish', 4: 'Muslim',
-            5: 'Atheist', 6: 'Agnostic', 7: 'Other', 8: 'Nothing'
-        },
-        'recode': {
-            'Protestant': 'Religious', 'Catholic': 'Religious', 'Jewish': 'Religious',
-            'Muslim': 'Religious', 'Other': 'Religious',
-            'Atheist': 'Not Religious', 'Agnostic': 'Not Religious', 'Nothing': 'Not Religious'
+            1: 'Protestant',
+            2: 'Roman Catholic',
+            3: 'Orthodox Christian',
+            4: 'Latter-Day Saints',
+            5: 'Jewish',
+            6: 'Muslim',
+            7: 'Buddhist',
+            8: 'Hindu',
+            9: 'Atheist',
+            10: 'Agnostic',
+            11: 'Something else'
         }
     },
 
