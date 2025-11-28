@@ -2,3 +2,5 @@
 /paper
 test_mcc_implementation.py
 *.pyc
+/correlation_results
+/data

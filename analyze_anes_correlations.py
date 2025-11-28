@@ -51,7 +51,7 @@ DEFAULT_QUESTIONS = [
     'immigration_policy'
 ]
 
-DEFAULT_DATA_PATH = 'anes_timeseries_2024_csv_20250808/anes_timeseries_2024_csv_20250808.csv'
+DEFAULT_DATA_PATH = 'data/anes_timeseries_2024_csv_20250808/anes_timeseries_2024_csv_20250808.csv'
 DEFAULT_OUTPUT_DIR = 'correlation_results'
 
 
