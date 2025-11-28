@@ -170,7 +170,7 @@ ANES_2024_VARIABLES = {
         }
     },
     'religion': {
-        'code': 'V241723',
+        'code': 'V241422',
         'label': 'Religious Affiliation',
         'values': {
             1: 'Protestant', 2: 'Catholic', 3: 'Jewish', 4: 'Muslim',
