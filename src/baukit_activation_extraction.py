@@ -35,7 +35,8 @@ def extract_full_activations_baukit(
     prompts: List[str],
     device: str,
     aggregation: str = 'mean',
-    batch_size: int = 1
+    batch_size: int = 1,
+    answer_texts: List[str] = None
 ) -> torch.Tensor:
     """
     Extract attention head activations using baukit.
@@ -53,11 +54,14 @@ def extract_full_activations_baukit(
             - 'mean': Average activations across all tokens (recommended)
             - 'last': Use only the last token's activations
             - 'all': Keep all tokens (for sequence-level tasks)
+            - 'answer_tokens': Average only over tokens corresponding to answer text
         batch_size: Number of prompts to process in parallel (default: 1)
+        answer_texts: List of answer strings (required when aggregation='answer_tokens')
+                     Must have same length as prompts
 
     Returns:
         Tensor of shape:
-        - If aggregation='mean' or 'last': (n_prompts, n_layers, n_heads, head_dim)
+        - If aggregation='mean', 'last', or 'answer_tokens': (n_prompts, n_layers, n_heads, head_dim)
         - If aggregation='all': (n_prompts, n_layers, n_heads, seq_len, head_dim)
 
     Example:
@@ -65,12 +69,28 @@ def extract_full_activations_baukit(
         ...     model, tokenizer, ["Hello world"], device="cuda"
         ... )
         >>> # Shape: (1, 16_layers, 32_heads, 64_head_dim) for LLaMA-3.2-1B
+
+        >>> # Extract from answer tokens only
+        >>> activations = extract_full_activations_baukit(
+        ...     model, tokenizer,
+        ...     ["A person is asked: Question? They answer: Yes"],
+        ...     device="cuda",
+        ...     aggregation='answer_tokens',
+        ...     answer_texts=["Yes"]
+        ... )
     """
     if not BAUKIT_AVAILABLE:
         raise ImportError(
             "baukit is required for activation extraction.\n"
             "Install with: pip install baukit"
         )
+
+    # Validate answer_tokens aggregation
+    if aggregation == 'answer_tokens':
+        if answer_texts is None:
+            raise ValueError("answer_texts must be provided when aggregation='answer_tokens'")
+        if len(answer_texts) != len(prompts):
+            raise ValueError(f"answer_texts length ({len(answer_texts)}) must match prompts length ({len(prompts)})")
 
     # Model architecture parameters
     num_layers = model.config.num_hidden_layers
@@ -80,6 +100,31 @@ def extract_full_activations_baukit(
     # Define which layers to hook into
     # For LLaMA: model.layers.{i}.self_attn outputs the attention layer result
     ATTN_OUTPUTS = [f"model.layers.{i}.self_attn" for i in range(num_layers)]
+
+    # Helper function to find answer token positions
+    def find_answer_token_positions(prompt: str, answer: str, tokenizer) -> List[int]:
+        """Find token positions corresponding to the answer in the prompt."""
+        # Tokenize full prompt
+        full_tokens = tokenizer.encode(prompt, add_special_tokens=True)
+
+        # Tokenize answer alone to see what tokens it produces
+        answer_tokens = tokenizer.encode(answer, add_special_tokens=False)
+
+        # Find where answer tokens appear in the full sequence
+        # We look for the answer tokens at the end of the prompt
+        if len(answer_tokens) == 0:
+            # Fallback to last token if answer is empty or becomes empty after tokenization
+            return [len(full_tokens) - 1]
+
+        # Search for answer tokens as a subsequence in the full tokens
+        # Start from the end since answers typically appear at the end
+        for start_pos in range(len(full_tokens) - len(answer_tokens), -1, -1):
+            if full_tokens[start_pos:start_pos + len(answer_tokens)] == answer_tokens:
+                return list(range(start_pos, start_pos + len(answer_tokens)))
+
+        # Fallback: if exact match not found, use last N tokens where N = len(answer_tokens)
+        # This handles cases where tokenization differs slightly in context
+        return list(range(max(0, len(full_tokens) - len(answer_tokens)), len(full_tokens)))
 
     all_activations = []
     model.eval()
@@ -127,6 +172,25 @@ def extract_full_activations_baukit(
                     elif aggregation == 'last':
                         # Use only last token: (batch, num_heads, head_dim)
                         head_out = head_out[:, -1, :, :]
+                    elif aggregation == 'answer_tokens':
+                        # Average over answer tokens only: (batch, num_heads, head_dim)
+                        batch_answer_activations = []
+                        for batch_idx in range(batch):
+                            prompt_idx = batch_start + batch_idx
+                            answer = answer_texts[prompt_idx]
+                            prompt = batch_prompts[batch_idx]
+
+                            # Find answer token positions
+                            answer_positions = find_answer_token_positions(prompt, answer, tokenizer)
+
+                            # Extract activations for answer tokens and average
+                            # head_out shape: (batch, seq_len, num_heads, head_dim)
+                            answer_acts = head_out[batch_idx, answer_positions, :, :]  # (n_answer_tokens, num_heads, head_dim)
+                            avg_answer_acts = answer_acts.mean(dim=0)  # (num_heads, head_dim)
+                            batch_answer_activations.append(avg_answer_acts)
+
+                        # Stack batch: (batch, num_heads, head_dim)
+                        head_out = torch.stack(batch_answer_activations, dim=0)
                     # else: keep all tokens (aggregation == 'all')
 
                     batch_activations.append(head_out.cpu())
@@ -145,7 +209,8 @@ def extract_mlp_activations_baukit(
     prompts: List[str],
     device: str,
     aggregation: str = 'mean',
-    batch_size: int = 1
+    batch_size: int = 1,
+    answer_texts: List[str] = None
 ) -> torch.Tensor:
     """
     Extract MLP (feed-forward) layer activations using baukit.
@@ -162,11 +227,14 @@ def extract_mlp_activations_baukit(
             - 'mean': Average activations across all tokens (recommended)
             - 'last': Use only the last token's activations
             - 'all': Keep all tokens (for sequence-level tasks)
+            - 'answer_tokens': Average only over tokens corresponding to answer text
         batch_size: Number of prompts to process in parallel (default: 1)
+        answer_texts: List of answer strings (required when aggregation='answer_tokens')
+                     Must have same length as prompts
 
     Returns:
         Tensor of shape:
-        - If aggregation='mean' or 'last': (n_prompts, n_layers, hidden_size)
+        - If aggregation='mean', 'last', or 'answer_tokens': (n_prompts, n_layers, hidden_size)
         - If aggregation='all': (n_prompts, n_layers, seq_len, hidden_size)
 
     Example:
@@ -181,6 +249,13 @@ def extract_mlp_activations_baukit(
             "Install with: pip install baukit"
         )
 
+    # Validate answer_tokens aggregation
+    if aggregation == 'answer_tokens':
+        if answer_texts is None:
+            raise ValueError("answer_texts must be provided when aggregation='answer_tokens'")
+        if len(answer_texts) != len(prompts):
+            raise ValueError(f"answer_texts length ({len(answer_texts)}) must match prompts length ({len(prompts)})")
+
     # Model architecture parameters
     num_layers = model.config.num_hidden_layers
     hidden_size = model.config.hidden_size
@@ -188,6 +263,31 @@ def extract_mlp_activations_baukit(
     # Define which MLP layers to hook into
     # For LLaMA: model.layers.{i}.mlp outputs the feed-forward layer result
     MLP_OUTPUTS = [f"model.layers.{i}.mlp" for i in range(num_layers)]
+
+    # Helper function to find answer token positions (same as in attention extraction)
+    def find_answer_token_positions(prompt: str, answer: str, tokenizer) -> List[int]:
+        """Find token positions corresponding to the answer in the prompt."""
+        # Tokenize full prompt
+        full_tokens = tokenizer.encode(prompt, add_special_tokens=True)
+
+        # Tokenize answer alone to see what tokens it produces
+        answer_tokens = tokenizer.encode(answer, add_special_tokens=False)
+
+        # Find where answer tokens appear in the full sequence
+        # We look for the answer tokens at the end of the prompt
+        if len(answer_tokens) == 0:
+            # Fallback to last token if answer is empty or becomes empty after tokenization
+            return [len(full_tokens) - 1]
+
+        # Search for answer tokens as a subsequence in the full tokens
+        # Start from the end since answers typically appear at the end
+        for start_pos in range(len(full_tokens) - len(answer_tokens), -1, -1):
+            if full_tokens[start_pos:start_pos + len(answer_tokens)] == answer_tokens:
+                return list(range(start_pos, start_pos + len(answer_tokens)))
+
+        # Fallback: if exact match not found, use last N tokens where N = len(answer_tokens)
+        # This handles cases where tokenization differs slightly in context
+        return list(range(max(0, len(full_tokens) - len(answer_tokens)), len(full_tokens)))
 
     all_activations = []
     model.eval()
@@ -229,6 +329,25 @@ def extract_mlp_activations_baukit(
                     elif aggregation == 'last':
                         # Use only last token: (batch, hidden_size)
                         mlp_out = mlp_out[:, -1, :]
+                    elif aggregation == 'answer_tokens':
+                        # Average over answer tokens only: (batch, hidden_size)
+                        batch_answer_activations = []
+                        for batch_idx in range(mlp_out.shape[0]):
+                            prompt_idx = batch_start + batch_idx
+                            answer = answer_texts[prompt_idx]
+                            prompt = batch_prompts[batch_idx]
+
+                            # Find answer token positions
+                            answer_positions = find_answer_token_positions(prompt, answer, tokenizer)
+
+                            # Extract activations for answer tokens and average
+                            # mlp_out shape: (batch, seq_len, hidden_size)
+                            answer_acts = mlp_out[batch_idx, answer_positions, :]  # (n_answer_tokens, hidden_size)
+                            avg_answer_acts = answer_acts.mean(dim=0)  # (hidden_size,)
+                            batch_answer_activations.append(avg_answer_acts)
+
+                        # Stack batch: (batch, hidden_size)
+                        mlp_out = torch.stack(batch_answer_activations, dim=0)
                     # else: keep all tokens (aggregation == 'all')
 
                     batch_activations.append(mlp_out.cpu())

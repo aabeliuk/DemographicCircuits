@@ -534,6 +534,7 @@ def extract_activations_for_question(
     all_prompts = []
     all_category_labels = []
     all_user_indices = []  # Track DataFrame row indices for confounder extraction
+    all_answers = []  # Track answer texts for answer token extraction
 
     # Get answer options
     answer_options = None
@@ -553,27 +554,37 @@ def extract_activations_for_question(
             all_prompts.append(prompt)
             all_category_labels.append(category_idx)
             all_user_indices.append(idx)  # Store DataFrame row index
+            all_answers.append(str(answer))  # Store answer text for token extraction
 
     # Extract activations
     if not BAUKIT_AVAILABLE:
         raise ImportError("This experiment requires baukit. Install with: pip install baukit")
 
     print(f"  Extracting {probe_type} activations for {len(all_prompts)} samples...")
+    print(f"  Using answer token aggregation (mean over answer tokens)")
 
     if probe_type == 'attention':
         all_activations = extract_full_activations_baukit(
-            model, tokenizer, all_prompts, device, aggregation='last'
+            model, tokenizer, all_prompts, device,
+            aggregation='answer_tokens',
+            answer_texts=all_answers
         )
     elif probe_type == 'mlp':
         all_activations = extract_mlp_activations_baukit(
-            model, tokenizer, all_prompts, device, aggregation='last'
+            model, tokenizer, all_prompts, device,
+            aggregation='answer_tokens',
+            answer_texts=all_answers
         )
     elif probe_type == 'both':
         attn_activations = extract_full_activations_baukit(
-            model, tokenizer, all_prompts, device, aggregation='last'
+            model, tokenizer, all_prompts, device,
+            aggregation='answer_tokens',
+            answer_texts=all_answers
         )
         mlp_activations = extract_mlp_activations_baukit(
-            model, tokenizer, all_prompts, device, aggregation='last'
+            model, tokenizer, all_prompts, device,
+            aggregation='answer_tokens',
+            answer_texts=all_answers
         )
         all_activations = (attn_activations, mlp_activations)
     else:
