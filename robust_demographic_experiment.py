@@ -774,7 +774,8 @@ def save_probing_results(
     probing_results,
     probe_type: str,
     output_path: Path,
-    demographic: str
+    demographic: str,
+    ridge_alpha: float
 ):
     """
     Save probing results to CSV and JSON formats.
@@ -784,6 +785,7 @@ def save_probing_results(
         probe_type: 'attention' or 'mlp'
         output_path: Directory to save results
         demographic: Name of demographic being probed
+        ridge_alpha: Ridge regression regularization parameter used in probing
     """
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -802,7 +804,8 @@ def save_probing_results(
                     'accuracy': head_info.val_score,  # val_score is the accuracy
                     'mcc_score': head_info.mcc_score,  # Matthews Correlation Coefficient (primary metric)
                     'spearman_r': head_info.spearman_r,  # Kept for comparison
-                    'p_value': head_info.spearman_p
+                    'p_value': head_info.spearman_p,
+                    'ridge_alpha': ridge_alpha
                 })
             else:
                 # Fallback for dict format
@@ -812,7 +815,8 @@ def save_probing_results(
                     'accuracy': head_info['accuracy'],
                     'mcc_score': head_info.get('mcc_score', 0.0),
                     'spearman_r': head_info['spearman_r'],
-                    'p_value': head_info['p_value']
+                    'p_value': head_info['p_value'],
+                    'ridge_alpha': ridge_alpha
                 })
 
         df = pd.DataFrame(results_list)
@@ -827,6 +831,7 @@ def save_probing_results(
         json_results = {
             'demographic': demographic,
             'probe_type': probe_type,
+            'ridge_alpha': ridge_alpha,
             'head_results': results_list,
             'timestamp': datetime.now().isoformat()
         }
@@ -845,7 +850,8 @@ def save_probing_results(
                 'accuracy': layer_info.val_score,  # val_score is the accuracy
                 'mcc_score': layer_info.mcc_score,  # Matthews Correlation Coefficient (primary metric)
                 'spearman_r': layer_info.spearman_r,  # Kept for comparison
-                'p_value': layer_info.spearman_p
+                'p_value': layer_info.spearman_p,
+                'ridge_alpha': ridge_alpha
             })
 
         df = pd.DataFrame(results_list)
@@ -860,6 +866,7 @@ def save_probing_results(
         json_results = {
             'demographic': demographic,
             'probe_type': probe_type,
+            'ridge_alpha': ridge_alpha,
             'layer_results': results_list,
             'timestamp': datetime.now().isoformat()
         }
@@ -1396,7 +1403,8 @@ def run_extraction_phase(args):
                     probing_data['probing_results'],
                     args.probe_type,
                     results_output_dir,
-                    f"{demographic}_fold{fold_idx + 1}"
+                    f"{demographic}_fold{fold_idx + 1}",
+                    args.ridge_alpha
                 )
 
                 # Create and save visualization
