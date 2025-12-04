@@ -181,6 +181,13 @@ class CCAAnalyzer:
         Returns:
             CCAResult with canonical correlations and weights
         """
+        # Ensure float32 dtype for numpy linalg compatibility
+        # float16 is not supported by np.linalg.lstsq
+        if activation_features.dtype == np.float16:
+            activation_features = activation_features.astype(np.float32)
+        if demographic_features.dtype == np.float16:
+            demographic_features = demographic_features.astype(np.float32)
+
         n_samples = activation_features.shape[0]
         activation_dim = activation_features.shape[1]
         demographic_dim = demographic_features.shape[1]
