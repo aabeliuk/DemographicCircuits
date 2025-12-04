@@ -28,6 +28,7 @@ from sklearn.model_selection import KFold
 from scipy.stats import spearmanr, pearsonr
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Literal
+from tqdm import tqdm
 import warnings
 
 
@@ -365,18 +366,22 @@ class CCAAnalyzer:
 
         n_samples, n_layers, n_heads, head_dim = activations.shape
 
-        # Analyze each head
+        # Analyze each head with progress bar
+        total_heads = n_layers * n_heads
         results = []
-        for layer in range(n_layers):
-            for head in range(n_heads):
-                head_features = activations[:, layer, head, :]  # (n_samples, head_dim)
 
-                result = self.analyze_single_component(
-                    head_features,
-                    demographic_features,
-                    component_id=(layer, head)
-                )
-                results.append(result)
+        with tqdm(total=total_heads, desc="Analyzing attention heads", unit="head") as pbar:
+            for layer in range(n_layers):
+                for head in range(n_heads):
+                    head_features = activations[:, layer, head, :]  # (n_samples, head_dim)
+
+                    result = self.analyze_single_component(
+                        head_features,
+                        demographic_features,
+                        component_id=(layer, head)
+                    )
+                    results.append(result)
+                    pbar.update(1)
 
         # Rank by validation score (absolute value of first canonical correlation)
         results.sort(key=lambda x: abs(x.val_score), reverse=True)
@@ -418,17 +423,20 @@ class CCAAnalyzer:
 
         n_samples, n_layers, hidden_dim = activations.shape
 
-        # Analyze each layer
+        # Analyze each layer with progress bar
         results = []
-        for layer in range(n_layers):
-            layer_features = activations[:, layer, :]  # (n_samples, hidden_dim)
 
-            result = self.analyze_single_component(
-                layer_features,
-                demographic_features,
-                component_id=(layer,)
-            )
-            results.append(result)
+        with tqdm(total=n_layers, desc="Analyzing MLP layers", unit="layer") as pbar:
+            for layer in range(n_layers):
+                layer_features = activations[:, layer, :]  # (n_samples, hidden_dim)
+
+                result = self.analyze_single_component(
+                    layer_features,
+                    demographic_features,
+                    component_id=(layer,)
+                )
+                results.append(result)
+                pbar.update(1)
 
         # Rank by validation score
         results.sort(key=lambda x: abs(x.val_score), reverse=True)
