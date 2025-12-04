@@ -498,10 +498,15 @@ def extract_activations_for_question(
     n_samples_per_category: int,
     device: str,
     probe_type: str,
-    prompt_style: str = "original"
+    prompt_style: str = "original",
+    exclude_demographic: bool = True
 ) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], List[str], Optional[np.ndarray]]:
     """
     Extract activations for a single question.
+
+    Args:
+        exclude_demographic: If True, exclude target demographic from prompts (for probing).
+                           If False, include all demographics (for CCA).
 
     Returns:
         activations: Model activations
@@ -558,7 +563,7 @@ def extract_activations_for_question(
             answer = user_profile[question]
             prompt = create_prompt(
                 user_profile, question,
-                exclude_attribute=demographic_attr,  # Exclude target demographic
+                exclude_attribute=demographic_attr if exclude_demographic else None,  # Exclude for probing, include for CCA
                 answer_options=answer_options,
                 answer=answer,
                 prompt_style=prompt_style
@@ -1536,10 +1541,15 @@ def run_extraction_phase(args):
             print(f"  {q_label}")
 
             try:
+                # For CCA, don't exclude demographic (include all info in prompts)
+                # For probing, exclude demographic (hide target attribute)
+                exclude_demo = (args.analysis_method != 'cca')
+
                 activations, labels, category_names, user_indices = extract_activations_for_question(
                     model, tokenizer, df, question, demographic,
                     args.n_samples_per_category, args.device, args.probe_type,
-                    args.prompt_style
+                    args.prompt_style,
+                    exclude_demographic=exclude_demo
                 )
 
                 if activations is None:
