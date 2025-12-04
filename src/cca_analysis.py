@@ -597,13 +597,15 @@ def encode_demographics_mixed(
         if ordinal_mappings and col in ordinal_mappings:
             # Use provided mapping
             mapping = ordinal_mappings[col]
-            ordinal_values = demographic_df[col].map(mapping).values.reshape(-1, 1)
+            ordinal_values = demographic_df[col].map(mapping).values
         else:
             # Use alphabetical ordering (convert to category codes)
-            ordinal_values = demographic_df[col].astype('category').cat.codes.values.reshape(-1, 1)
+            ordinal_values = demographic_df[col].astype('category').cat.codes.values
 
-        # Handle NaN (set to -1 or mean)
+        # Convert to float and handle NaN (set to -1)
+        ordinal_values = ordinal_values.astype(float)
         ordinal_values = np.where(np.isnan(ordinal_values), -1, ordinal_values)
+        ordinal_values = ordinal_values.reshape(-1, 1)
 
         encoded_features.append(ordinal_values)
 
