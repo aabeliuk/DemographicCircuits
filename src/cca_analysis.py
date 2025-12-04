@@ -541,6 +541,79 @@ def encode_demographic_features(
     return np.hstack(encoded_features)
 
 
+def encode_demographics_mixed(
+    demographic_df,
+    categorical_columns: List[str] = None,
+    ordinal_columns: List[str] = None,
+    ordinal_mappings: dict = None
+) -> np.ndarray:
+    """
+    Encode demographics with mixed strategy: one-hot for categorical, ordinal for ordered.
+
+    Args:
+        demographic_df: DataFrame with demographic columns
+        categorical_columns: Columns to one-hot encode (e.g., ['gender', 'race'])
+        ordinal_columns: Columns to encode as ordinal (e.g., ['age', 'income', 'ideology'])
+        ordinal_mappings: Optional dict mapping column -> {value: numeric_code}
+                         If not provided, will use alphabetical ordering
+
+    Returns:
+        Mixed encoded matrix (n_samples, n_features)
+
+    Example:
+        >>> Y = encode_demographics_mixed(
+        ...     df,
+        ...     categorical_columns=['gender', 'race', 'education'],
+        ...     ordinal_columns=['age', 'ideology'],
+        ...     ordinal_mappings={
+        ...         'age': {'Young Adult': 0, 'Adult': 1, 'Senior': 2},
+        ...         'ideology': {'Left': 0, 'Center': 1, 'Right': 2}
+        ...     }
+        ... )
+    """
+    import pandas as pd
+
+    if categorical_columns is None:
+        categorical_columns = []
+    if ordinal_columns is None:
+        ordinal_columns = []
+
+    if len(categorical_columns) == 0 and len(ordinal_columns) == 0:
+        raise ValueError("Must specify at least one categorical or ordinal column")
+
+    encoded_features = []
+
+    # One-hot encode categorical features
+    for col in categorical_columns:
+        if col in demographic_df.columns:
+            dummies = pd.get_dummies(demographic_df[col], prefix=col, drop_first=False)
+            encoded_features.append(dummies.values)
+
+    # Ordinal encode ordered features
+    for col in ordinal_columns:
+        if col not in demographic_df.columns:
+            continue
+
+        if ordinal_mappings and col in ordinal_mappings:
+            # Use provided mapping
+            mapping = ordinal_mappings[col]
+            ordinal_values = demographic_df[col].map(mapping).values.reshape(-1, 1)
+        else:
+            # Use alphabetical ordering (convert to category codes)
+            ordinal_values = demographic_df[col].astype('category').cat.codes.values.reshape(-1, 1)
+
+        # Handle NaN (set to -1 or mean)
+        ordinal_values = np.where(np.isnan(ordinal_values), -1, ordinal_values)
+
+        encoded_features.append(ordinal_values)
+
+    if len(encoded_features) == 0:
+        raise ValueError("No demographic columns found in dataframe")
+
+    # Concatenate all encoded features
+    return np.hstack(encoded_features)
+
+
 def compare_cca_vs_probing(
     cca_results: CCAAnalysisResults,
     probing_results,  # CircuitProbingResults or MLPLayerProbingResults
