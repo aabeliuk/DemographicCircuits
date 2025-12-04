@@ -810,6 +810,94 @@ def get_demographic_columns(demographic: str) -> List[str]:
     return base_demographics
 
 
+def extract_activations_for_cca(
+    model,
+    tokenizer,
+    df: pd.DataFrame,
+    question: str,
+    n_samples: int,
+    device: str,
+    probe_type: str,
+    prompt_style: str = "original"
+) -> Tuple[Optional[torch.Tensor], Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Extract activations for CCA analysis (all users, not per demographic).
+
+    Unlike probing which samples per category, CCA uses all available users
+    to capture the full spectrum of demographic variation.
+
+    Args:
+        n_samples: Maximum number of samples to use (randomly sampled if more available)
+
+    Returns:
+        activations: Model activations
+        user_indices: DataFrame row indices for each sample
+        user_df: Subset of df with sampled users (for demographic encoding)
+    """
+    # Filter for valid responses to this question
+    valid_df = df[df[question].notna()].copy()
+
+    if len(valid_df) == 0:
+        print(f"  WARNING: No valid responses for {question}")
+        return None, None, None
+
+    # Sample users (if we have more than requested)
+    if len(valid_df) > n_samples:
+        sampled_df = valid_df.sample(n=n_samples, random_state=42)
+    else:
+        sampled_df = valid_df
+
+    print(f"  Sampled {len(sampled_df)} users")
+
+    # Create prompts with ALL demographics included
+    all_prompts = []
+    all_user_indices = []
+    all_answers = []
+
+    # Get answer options
+    answer_options = None
+    if question in ANES_2024_VARIABLES and 'values' in ANES_2024_VARIABLES[question]:
+        answer_options = list(ANES_2024_VARIABLES[question]['values'].values())
+
+    for idx, user_profile in sampled_df.iterrows():
+        answer = user_profile[question]
+        prompt = create_prompt(
+            user_profile, question,
+            exclude_attribute=None,  # Include ALL demographics for CCA
+            answer_options=answer_options,
+            answer=answer,
+            prompt_style=prompt_style
+        )
+        all_prompts.append(prompt)
+        all_user_indices.append(idx)
+        all_answers.append(str(answer))
+
+    # Extract activations
+    if not BAUKIT_AVAILABLE:
+        raise ImportError("This experiment requires baukit. Install with: pip install baukit")
+
+    print(f"  Extracting {probe_type} activations for {len(all_prompts)} samples...")
+
+    if probe_type == 'attention':
+        all_activations = extract_full_activations_baukit(
+            model, tokenizer, all_prompts, device,
+            aggregation='answer_tokens',
+            answer_texts=all_answers
+        )
+    elif probe_type == 'mlp':
+        all_activations = extract_mlp_activations_baukit(
+            model, tokenizer, all_prompts, device,
+            aggregation='answer_tokens',
+            answer_texts=all_answers
+        )
+    else:
+        raise ValueError(f"probe_type 'both' not supported for CCA")
+
+    user_indices = np.array(all_user_indices)
+
+    return all_activations, user_indices, sampled_df
+
+
 def run_cca_and_select_top_components(
     activations: torch.Tensor,
     demographic_labels: np.ndarray,
@@ -1463,6 +1551,274 @@ def filter_activations_by_top_components(
     return filtered_activations
 
 
+def run_cca_extraction_phase(args, model, tokenizer, df, output_dir, model_config):
+    """
+    CCA-specific extraction phase.
+
+    Unlike probing which iterates per demographic, CCA:
+    1. Extracts activations for ALL users across all questions (one pass)
+    2. Builds X matrix (activations) and Y matrix (all demographics)
+    3. Runs k-fold CV on questions
+    4. Performs ONE CCA analysis discovering components encoding ANY demographic combination
+    """
+    print(f"\n{'='*80}")
+    print("CCA EXTRACTION PHASE - ALL DEMOGRAPHICS")
+    print(f"{'='*80}")
+
+    from src.cca_analysis import CCAAnalyzer, encode_demographics_mixed
+
+    # Define demographic encoding strategy
+    categorical_demographics = ['gender', 'race', 'education', 'urban_rural']
+    ordinal_demographics = ['age', 'ideology']  # These have natural ordering
+
+    # Ordinal mappings for ordered demographics
+    ordinal_mappings = {
+        'age': {'Young Adult': 0, 'Adult': 1, 'Senior': 2},
+        'ideology': {'Left': 0, 'Center': 1, 'Right': 2}
+    }
+
+    # Extract activations for all questions
+    question_extractions = {}
+
+    print(f"\nExtracting activations for {len(ALL_POLITICAL_QUESTIONS)} questions...")
+    print(f"Sampling strategy: {args.n_samples_per_category * 3} users per question (across all demographics)")
+
+    for q_idx, question in enumerate(ALL_POLITICAL_QUESTIONS):
+        q_label = ANES_2024_VARIABLES.get(question, {}).get('label', question)
+        print(f"\nQuestion {q_idx + 1}/{len(ALL_POLITICAL_QUESTIONS)}: {question}")
+        print(f"  {q_label}")
+
+        try:
+            # Extract for ALL users (not per category)
+            n_samples = args.n_samples_per_category * 3  # More samples since not per-category
+            activations, user_indices, user_df = extract_activations_for_cca(
+                model, tokenizer, df, question, n_samples,
+                args.device, args.probe_type, args.prompt_style
+            )
+
+            if activations is None:
+                print(f"  Skipping due to insufficient data")
+                continue
+
+            # Encode ALL demographics for these users
+            demographic_features = encode_demographics_mixed(
+                user_df,
+                categorical_columns=categorical_demographics,
+                ordinal_columns=ordinal_demographics,
+                ordinal_mappings=ordinal_mappings
+            )
+
+            question_extractions[question] = {
+                'activations': activations,
+                'user_indices': user_indices,
+                'demographic_features': demographic_features,
+                'user_df': user_df  # For later analysis
+            }
+
+            print(f"  Extracted: activations {activations.shape}, demographics {demographic_features.shape}")
+
+        except Exception as e:
+            print(f"  ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    if len(question_extractions) == 0:
+        print("\nNo questions extracted. Aborting CCA analysis.")
+        return
+
+    print(f"\nSuccessfully extracted {len(question_extractions)} questions")
+
+    # K-FOLD CROSS-VALIDATION ON QUESTIONS
+    print(f"\n{'='*80}")
+    print(f"K-FOLD CCA ANALYSIS")
+    print(f"{'='*80}")
+
+    questions = list(question_extractions.keys())
+    from sklearn.model_selection import KFold
+    kfold = KFold(n_splits=args.n_folds, shuffle=True, random_state=args.seed)
+
+    print(f"\nSplitting {len(questions)} questions into {args.n_folds} folds")
+    print(f"Each fold will run CCA on concatenated train questions\n")
+
+    for fold_idx, (train_indices, test_indices) in enumerate(kfold.split(questions)):
+        print(f"\n{'-'*80}")
+        print(f"FOLD {fold_idx + 1}/{args.n_folds}")
+        print(f"{'-'*80}")
+
+        train_questions = [questions[i] for i in train_indices]
+        test_questions = [questions[i] for i in test_indices]
+
+        print(f"Train questions ({len(train_questions)}): {train_questions[:3]}...")
+        print(f"Test questions ({len(test_questions)}): {test_questions}")
+
+        # Concatenate activations and demographics across TRAIN questions
+        train_activations_list = []
+        train_demographics_list = []
+        train_user_indices_list = []
+
+        for question in train_questions:
+            q_data = question_extractions[question]
+            train_activations_list.append(q_data['activations'])
+            train_demographics_list.append(q_data['demographic_features'])
+            train_user_indices_list.append(q_data['user_indices'])
+
+        # Concatenate across all train questions
+        concatenated_activations = torch.cat(train_activations_list, dim=0)
+        concatenated_demographics = np.vstack(train_demographics_list)
+        concatenated_user_indices = np.concatenate(train_user_indices_list)
+
+        print(f"\nTrain data shapes:")
+        print(f"  Activations: {concatenated_activations.shape}")
+        print(f"  Demographics: {concatenated_demographics.shape}")
+        print(f"  Total samples: {len(concatenated_user_indices)}")
+
+        # Run CCA analysis
+        print(f"\n{'='*60}")
+        print("RUNNING CCA ANALYSIS")
+        print(f"{'='*60}")
+
+        # Initialize CCA analyzer
+        analyzer = CCAAnalyzer(
+            n_components=args.cca_n_components,
+            max_iter=args.cca_max_iter,
+            n_folds=3,  # Internal CV for CCA
+            scale_data=True
+        )
+
+        # Run CCA based on probe type
+        if args.probe_type == 'attention':
+            cca_results = analyzer.analyze_attention_heads(
+                concatenated_activations,
+                concatenated_demographics,
+                aggregation='mean'
+            )
+        elif args.probe_type == 'mlp':
+            cca_results = analyzer.analyze_mlp_layers(
+                concatenated_activations,
+                concatenated_demographics
+            )
+        else:
+            raise ValueError(f"probe_type '{args.probe_type}' not supported for CCA")
+
+        print(f"\nCCA Results:")
+        print(f"  Components analyzed: {cca_results.num_components_analyzed}")
+        print(f"  Canonical dimensions: {cca_results.n_canonical_dims}")
+        print(f"  Top component score: {cca_results.top_k_scores[0]:.4f}")
+
+        # Get top-k components
+        top_components = cca_results.top_k_components[:args.top_k_heads]
+
+        # Save CCA results
+        print(f"\nSaving fold {fold_idx + 1} CCA results and visualizations...")
+        results_output_dir = output_dir / 'cca_results'
+
+        save_cca_results(
+            cca_results,
+            args.probe_type,
+            results_output_dir,
+            f"all_demographics_fold{fold_idx + 1}"
+        )
+
+        # Create visualizations
+        from src.cca_visualizations import (
+            plot_canonical_correlations,
+            plot_demographic_loadings,
+            plot_component_rankings
+        )
+
+        plot_canonical_correlations(
+            cca_results,
+            results_output_dir,
+            "all_demographics",
+            args.run_id,
+            fold_idx
+        )
+
+        plot_demographic_loadings(
+            cca_results,
+            results_output_dir,
+            "all_demographics",
+            args.run_id,
+            fold_idx,
+            top_k=5
+        )
+
+        plot_component_rankings(
+            cca_results,
+            args.probe_type,
+            results_output_dir,
+            "all_demographics",
+            args.run_id,
+            fold_idx,
+            top_k=args.top_k_heads
+        )
+
+        # Filter activations for train questions only (for intervention phase)
+        print(f"\nFiltering {len(train_questions)} train questions to top {args.top_k_heads} components...")
+        fold_question_extractions = {}
+
+        for question in train_questions:
+            q_data = question_extractions[question]
+            original_shape = q_data['activations'].shape
+
+            filtered_activations = filter_activations_by_top_components(
+                q_data['activations'],
+                top_components,
+                args.probe_type,
+                model_config
+            )
+
+            fold_question_extractions[question] = {
+                'activations': filtered_activations,
+                'user_indices': q_data['user_indices'],
+                'demographic_features': q_data['demographic_features']
+            }
+
+            if question in train_questions[:3]:
+                print(f"  {question}: {original_shape} -> {filtered_activations.shape}")
+
+        # Save fold-specific extraction file
+        fold_extraction_file = output_dir / f"cca_all_demographics_{args.probe_type}_{args.run_id}_fold{fold_idx + 1}_extractions.pkl"
+
+        extraction_data = {
+            'analysis_method': 'cca',
+            'demographics': categorical_demographics + ordinal_demographics,
+            'probe_type': args.probe_type,
+            'model': args.model,
+            'run_id': args.run_id,
+            'fold_index': fold_idx,
+            'fold_total': args.n_folds,
+            'train_questions': train_questions,
+            'test_questions': test_questions,
+            'top_components': top_components,
+            'top_k': args.top_k_heads,
+            'question_extractions': fold_question_extractions,
+            'cca_results_summary': {
+                'n_components_analyzed': cca_results.num_components_analyzed,
+                'n_canonical_dims': cca_results.n_canonical_dims,
+                'top_k_scores': cca_results.top_k_scores[:args.top_k_heads]
+            },
+            'timestamp': datetime.now().isoformat()
+        }
+
+        with open(fold_extraction_file, 'wb') as f:
+            pickle.dump(extraction_data, f)
+
+        print(f"\nSaved fold {fold_idx + 1} extractions: {fold_extraction_file}")
+
+        # Clean up to free memory
+        del concatenated_activations
+        del concatenated_demographics
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    print(f"\n{'='*80}")
+    print("CCA EXTRACTION COMPLETE")
+    print(f"{'='*80}")
+    print(f"\nSaved {args.n_folds} fold-specific extraction files")
+    print(f"Files: cca_all_demographics_{args.probe_type}_{args.run_id}_fold*.pkl")
+
+
 def run_extraction_phase(args):
     """
     Phase 1: Extract activations for all questions and perform k-fold probing.
@@ -1520,7 +1876,31 @@ def run_extraction_phase(args):
         'hidden_size': model.config.hidden_size
     }
 
-    # Process each demographic
+    # Branch based on analysis method
+    if args.analysis_method == 'cca':
+        # CCA-specific extraction (no demographic loop, analyzes all demographics together)
+        print(f"\nAnalysis method: CCA (Canonical Correlation Analysis)")
+        print("Processing all demographics in one pass...")
+        run_cca_extraction_phase(args, model, tokenizer, df, output_dir, model_config)
+        return  # Done with extraction
+
+    elif args.analysis_method == 'both':
+        # Run CCA first
+        print(f"\nAnalysis method: BOTH (CCA + Probing)")
+        print("\n" + "="*80)
+        print("PART 1: CCA EXTRACTION")
+        print("="*80)
+        run_cca_extraction_phase(args, model, tokenizer, df, output_dir, model_config)
+
+        print(f"\n" + "="*80)
+        print("PART 2: PROBING EXTRACTION")
+        print("="*80)
+        # Continue to probing below
+
+    else:  # 'probing'
+        print(f"\nAnalysis method: PROBING (Ridge Regression)")
+
+    # Process each demographic (for probing only)
     for demographic in args.demographics:
         print(f"\n{'='*80}")
         print(f"EXTRACTING: {demographic.upper()}")
