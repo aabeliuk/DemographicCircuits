@@ -1577,6 +1577,16 @@ def run_cca_extraction_phase(args, model, tokenizer, df, output_dir, model_confi
         'ideology': {'Left': 0, 'Center': 1, 'Right': 2}
     }
 
+    # PRE-FIT: Get all unique values for categorical columns from entire dataset
+    # This ensures consistent encoding across all questions
+    print("\nPre-computing fixed demographic categories...")
+    fixed_categories = {}
+    for col in categorical_demographics:
+        if col in df.columns:
+            unique_values = df[col].dropna().unique().tolist()
+            fixed_categories[col] = sorted(unique_values)  # Sort for consistency
+            print(f"  {col}: {len(unique_values)} categories - {unique_values}")
+
     # Extract activations for all questions
     question_extractions = {}
 
@@ -1600,12 +1610,13 @@ def run_cca_extraction_phase(args, model, tokenizer, df, output_dir, model_confi
                 print(f"  Skipping due to insufficient data")
                 continue
 
-            # Encode ALL demographics for these users
+            # Encode ALL demographics for these users with FIXED categories
             demographic_features = encode_demographics_mixed(
                 user_df,
                 categorical_columns=categorical_demographics,
                 ordinal_columns=ordinal_demographics,
-                ordinal_mappings=ordinal_mappings
+                ordinal_mappings=ordinal_mappings,
+                fixed_categories=fixed_categories  # Ensure consistent dimensions
             )
 
             question_extractions[question] = {
