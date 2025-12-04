@@ -1,0 +1,599 @@
+"""
+Canonical Correlation Analysis (CCA) for Demographic Circuit Analysis
+
+This module implements CCA to find shared dimensions between model activations
+and demographic profiles. CCA maximizes correlation between linear combinations
+of two sets of variables:
+
+    Find u, v such that: corr(X@u, Y@v) is maximized
+
+Where:
+- X: Model activations (attention heads or MLP layers)
+- Y: Demographic profile vectors (one-hot encoded)
+- u: Canonical weights for activations (shows which components participate)
+- v: Canonical weights for demographics (shows which combinations are encoded)
+
+Key advantages over linear probing:
+1. Captures multi-dimensional relationships between activations and demographics
+2. Reveals which demographic combinations are most strongly encoded
+3. Provides interpretable canonical variates for visualization
+4. Natural dimensionality reduction through ranked canonical correlations
+"""
+
+import numpy as np
+import torch
+from sklearn.cross_decomposition import CCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
+from scipy.stats import spearmanr, pearsonr
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional, Literal
+import warnings
+
+
+@dataclass
+class CCAResult:
+    """Results from CCA analysis on a single component (head or layer)"""
+    component_id: Tuple[int, ...]  # (layer, head) for attention or (layer,) for MLP
+    canonical_correlations: np.ndarray  # Shape: (n_components,)
+    left_weights: np.ndarray  # u vectors - activation space weights
+    right_weights: np.ndarray  # v vectors - demographic space weights
+    left_loadings: np.ndarray  # Correlations between original X and canonical variates
+    right_loadings: np.ndarray  # Correlations between original Y and canonical variates
+    variance_explained_activation: float  # % variance in activations explained
+    variance_explained_demographic: float  # % variance in demographics explained
+    train_score: float  # Training correlation (first canonical component)
+    val_score: float  # Validation correlation (first canonical component)
+    n_samples_train: int
+    n_samples_val: int
+
+
+@dataclass
+class CCAAnalysisResults:
+    """Complete results from CCA analysis across all components"""
+    component_results: List[CCAResult]
+    top_k_components: List[Tuple[int, ...]]  # Ranked by validation score
+    top_k_scores: List[float]  # First canonical correlation for each component
+    num_components_analyzed: int
+    n_canonical_dims: int  # Number of canonical dimensions extracted
+    component_type: Literal['attention_head', 'mlp_layer']
+
+    def get_top_components(self, k: int) -> List[CCAResult]:
+        """Get top-k components by validation score"""
+        return self.component_results[:k]
+
+
+class CCAAnalyzer:
+    """
+    Performs Canonical Correlation Analysis between model activations and demographics.
+
+    Supports both attention head analysis and MLP layer analysis with cross-validation.
+    """
+
+    def __init__(
+        self,
+        n_components: int = None,
+        max_iter: int = 500,
+        n_folds: int = 3,
+        scale_data: bool = True,
+        random_state: int = 42
+    ):
+        """
+        Args:
+            n_components: Number of canonical dimensions to extract (default: min(X_dim, Y_dim))
+            max_iter: Maximum iterations for CCA optimization
+            n_folds: Number of cross-validation folds
+            scale_data: Whether to standardize features before CCA
+            random_state: Random seed for reproducibility
+        """
+        self.n_components = n_components
+        self.max_iter = max_iter
+        self.n_folds = n_folds
+        self.scale_data = scale_data
+        self.random_state = random_state
+
+    def _compute_loadings(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        X_canonical: np.ndarray,
+        Y_canonical: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute loadings (correlations between original variables and canonical variates).
+
+        Args:
+            X: Original activation features (n_samples, activation_dim)
+            Y: Original demographic features (n_samples, demographic_dim)
+            X_canonical: Canonical variates for X (n_samples, n_components)
+            Y_canonical: Canonical variates for Y (n_samples, n_components)
+
+        Returns:
+            left_loadings: Correlations between X and X_canonical (activation_dim, n_components)
+            right_loadings: Correlations between Y and Y_canonical (demographic_dim, n_components)
+        """
+        n_components = X_canonical.shape[1]
+
+        left_loadings = np.zeros((X.shape[1], n_components))
+        right_loadings = np.zeros((Y.shape[1], n_components))
+
+        for i in range(n_components):
+            for j in range(X.shape[1]):
+                left_loadings[j, i] = pearsonr(X[:, j], X_canonical[:, i])[0]
+
+            for j in range(Y.shape[1]):
+                right_loadings[j, i] = pearsonr(Y[:, j], Y_canonical[:, i])[0]
+
+        return left_loadings, right_loadings
+
+    def _compute_variance_explained(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        X_canonical: np.ndarray,
+        Y_canonical: np.ndarray
+    ) -> Tuple[float, float]:
+        """
+        Compute variance explained in original spaces by canonical variates.
+
+        Returns:
+            variance_explained_X: % variance in X explained by X_canonical
+            variance_explained_Y: % variance in Y explained by Y_canonical
+        """
+        # Total variance
+        total_var_X = np.var(X, axis=0).sum()
+        total_var_Y = np.var(Y, axis=0).sum()
+
+        # Variance explained by canonical variates (using R^2 from regression)
+        var_explained_X = 0
+        var_explained_Y = 0
+
+        for i in range(X.shape[1]):
+            # Regress original variable on canonical variates
+            coef = np.linalg.lstsq(X_canonical, X[:, i], rcond=None)[0]
+            predicted = X_canonical @ coef
+            r2 = 1 - np.var(X[:, i] - predicted) / np.var(X[:, i])
+            var_explained_X += r2 * np.var(X[:, i])
+
+        for i in range(Y.shape[1]):
+            coef = np.linalg.lstsq(Y_canonical, Y[:, i], rcond=None)[0]
+            predicted = Y_canonical @ coef
+            r2 = 1 - np.var(Y[:, i] - predicted) / np.var(Y[:, i])
+            var_explained_Y += r2 * np.var(Y[:, i])
+
+        return (var_explained_X / total_var_X * 100,
+                var_explained_Y / total_var_Y * 100)
+
+    def analyze_single_component(
+        self,
+        activation_features: np.ndarray,
+        demographic_features: np.ndarray,
+        component_id: Tuple[int, ...]
+    ) -> CCAResult:
+        """
+        Perform CCA on a single component (attention head or MLP layer) with cross-validation.
+
+        Args:
+            activation_features: Shape (n_samples, activation_dim)
+            demographic_features: Shape (n_samples, demographic_dim)
+            component_id: Identifier for this component (e.g., (layer, head) or (layer,))
+
+        Returns:
+            CCAResult with canonical correlations and weights
+        """
+        n_samples = activation_features.shape[0]
+        activation_dim = activation_features.shape[1]
+        demographic_dim = demographic_features.shape[1]
+
+        # Determine number of components (cannot exceed min dimension)
+        n_components = self.n_components
+        if n_components is None:
+            n_components = min(activation_dim, demographic_dim, n_samples // 2)
+        else:
+            n_components = min(n_components, activation_dim, demographic_dim, n_samples // 2)
+
+        if n_components < 1:
+            warnings.warn(f"Insufficient samples or dimensions for CCA on component {component_id}")
+            # Return empty result
+            return CCAResult(
+                component_id=component_id,
+                canonical_correlations=np.array([0.0]),
+                left_weights=np.zeros((activation_dim, 1)),
+                right_weights=np.zeros((demographic_dim, 1)),
+                left_loadings=np.zeros((activation_dim, 1)),
+                right_loadings=np.zeros((demographic_dim, 1)),
+                variance_explained_activation=0.0,
+                variance_explained_demographic=0.0,
+                train_score=0.0,
+                val_score=0.0,
+                n_samples_train=0,
+                n_samples_val=0
+            )
+
+        # Cross-validation
+        kf = KFold(n_splits=self.n_folds, shuffle=True, random_state=self.random_state)
+        train_scores = []
+        val_scores = []
+        n_train_samples = []
+        n_val_samples = []
+
+        for train_idx, val_idx in kf.split(activation_features):
+            X_train = activation_features[train_idx]
+            Y_train = demographic_features[train_idx]
+            X_val = activation_features[val_idx]
+            Y_val = demographic_features[val_idx]
+
+            # Check if we have enough samples
+            if len(train_idx) < n_components or len(val_idx) < n_components:
+                continue
+
+            # Standardize if requested
+            if self.scale_data:
+                scaler_X = StandardScaler()
+                scaler_Y = StandardScaler()
+                X_train = scaler_X.fit_transform(X_train)
+                Y_train = scaler_Y.fit_transform(Y_train)
+                X_val = scaler_X.transform(X_val)
+                Y_val = scaler_Y.transform(Y_val)
+
+            # Fit CCA
+            cca = CCA(n_components=n_components, max_iter=self.max_iter)
+
+            try:
+                cca.fit(X_train, Y_train)
+
+                # Transform to canonical space
+                X_train_c, Y_train_c = cca.transform(X_train, Y_train)
+                X_val_c, Y_val_c = cca.transform(X_val, Y_val)
+
+                # Score: correlation of first canonical variate
+                train_corr = pearsonr(X_train_c[:, 0], Y_train_c[:, 0])[0]
+                val_corr = pearsonr(X_val_c[:, 0], Y_val_c[:, 0])[0]
+
+                train_scores.append(train_corr)
+                val_scores.append(val_corr)
+                n_train_samples.append(len(train_idx))
+                n_val_samples.append(len(val_idx))
+
+            except Exception as e:
+                warnings.warn(f"CCA failed for component {component_id}: {e}")
+                continue
+
+        if len(train_scores) == 0:
+            # All folds failed
+            return CCAResult(
+                component_id=component_id,
+                canonical_correlations=np.array([0.0]),
+                left_weights=np.zeros((activation_dim, 1)),
+                right_weights=np.zeros((demographic_dim, 1)),
+                left_loadings=np.zeros((activation_dim, 1)),
+                right_loadings=np.zeros((demographic_dim, 1)),
+                variance_explained_activation=0.0,
+                variance_explained_demographic=0.0,
+                train_score=0.0,
+                val_score=0.0,
+                n_samples_train=0,
+                n_samples_val=0
+            )
+
+        # Fit final model on all data
+        if self.scale_data:
+            scaler_X = StandardScaler()
+            scaler_Y = StandardScaler()
+            X_scaled = scaler_X.fit_transform(activation_features)
+            Y_scaled = scaler_Y.fit_transform(demographic_features)
+        else:
+            X_scaled = activation_features
+            Y_scaled = demographic_features
+
+        final_cca = CCA(n_components=n_components, max_iter=self.max_iter)
+        final_cca.fit(X_scaled, Y_scaled)
+
+        # Transform to canonical space
+        X_c, Y_c = final_cca.transform(X_scaled, Y_scaled)
+
+        # Compute canonical correlations for each component
+        canonical_corrs = np.array([
+            pearsonr(X_c[:, i], Y_c[:, i])[0]
+            for i in range(n_components)
+        ])
+
+        # Extract weights (u and v vectors)
+        left_weights = final_cca.x_weights_  # Shape: (activation_dim, n_components)
+        right_weights = final_cca.y_weights_  # Shape: (demographic_dim, n_components)
+
+        # Compute loadings
+        left_loadings, right_loadings = self._compute_loadings(
+            X_scaled, Y_scaled, X_c, Y_c
+        )
+
+        # Compute variance explained
+        var_exp_act, var_exp_demo = self._compute_variance_explained(
+            X_scaled, Y_scaled, X_c, Y_c
+        )
+
+        return CCAResult(
+            component_id=component_id,
+            canonical_correlations=canonical_corrs,
+            left_weights=left_weights,
+            right_weights=right_weights,
+            left_loadings=left_loadings,
+            right_loadings=right_loadings,
+            variance_explained_activation=var_exp_act,
+            variance_explained_demographic=var_exp_demo,
+            train_score=np.mean(train_scores),
+            val_score=np.mean(val_scores),
+            n_samples_train=int(np.mean(n_train_samples)),
+            n_samples_val=int(np.mean(n_val_samples))
+        )
+
+    def analyze_attention_heads(
+        self,
+        activations: torch.Tensor,
+        demographic_features: np.ndarray,
+        aggregation: Literal['mean', 'last_token'] = 'mean'
+    ) -> CCAAnalysisResults:
+        """
+        Perform CCA on all attention heads.
+
+        Args:
+            activations: Shape (n_samples, n_layers, n_heads, seq_len, head_dim)
+                        or (n_samples, n_layers, n_heads, head_dim) if already aggregated
+            demographic_features: Shape (n_samples, demographic_dim) - one-hot encoded
+            aggregation: How to aggregate across sequence length
+
+        Returns:
+            CCAAnalysisResults with all head results ranked by validation score
+        """
+        # Convert to numpy
+        if isinstance(activations, torch.Tensor):
+            activations = activations.cpu().numpy()
+
+        # Aggregate over sequence dimension if needed
+        if activations.ndim == 5:
+            if aggregation == 'mean':
+                activations = np.mean(activations, axis=3)
+            elif aggregation == 'last_token':
+                activations = activations[:, :, :, -1, :]
+
+        n_samples, n_layers, n_heads, head_dim = activations.shape
+
+        # Analyze each head
+        results = []
+        for layer in range(n_layers):
+            for head in range(n_heads):
+                head_features = activations[:, layer, head, :]  # (n_samples, head_dim)
+
+                result = self.analyze_single_component(
+                    head_features,
+                    demographic_features,
+                    component_id=(layer, head)
+                )
+                results.append(result)
+
+        # Rank by validation score (absolute value of first canonical correlation)
+        results.sort(key=lambda x: abs(x.val_score), reverse=True)
+
+        # Extract top-k info
+        top_k_components = [r.component_id for r in results]
+        top_k_scores = [r.val_score for r in results]
+
+        # Determine number of canonical dimensions
+        n_canonical_dims = results[0].canonical_correlations.shape[0] if results else 0
+
+        return CCAAnalysisResults(
+            component_results=results,
+            top_k_components=top_k_components,
+            top_k_scores=top_k_scores,
+            num_components_analyzed=len(results),
+            n_canonical_dims=n_canonical_dims,
+            component_type='attention_head'
+        )
+
+    def analyze_mlp_layers(
+        self,
+        activations: torch.Tensor,
+        demographic_features: np.ndarray
+    ) -> CCAAnalysisResults:
+        """
+        Perform CCA on all MLP layers.
+
+        Args:
+            activations: Shape (n_samples, n_layers, hidden_dim)
+            demographic_features: Shape (n_samples, demographic_dim) - one-hot encoded
+
+        Returns:
+            CCAAnalysisResults with all layer results ranked by validation score
+        """
+        # Convert to numpy
+        if isinstance(activations, torch.Tensor):
+            activations = activations.cpu().numpy()
+
+        n_samples, n_layers, hidden_dim = activations.shape
+
+        # Analyze each layer
+        results = []
+        for layer in range(n_layers):
+            layer_features = activations[:, layer, :]  # (n_samples, hidden_dim)
+
+            result = self.analyze_single_component(
+                layer_features,
+                demographic_features,
+                component_id=(layer,)
+            )
+            results.append(result)
+
+        # Rank by validation score
+        results.sort(key=lambda x: abs(x.val_score), reverse=True)
+
+        # Extract top-k info
+        top_k_components = [r.component_id for r in results]
+        top_k_scores = [r.val_score for r in results]
+
+        # Determine number of canonical dimensions
+        n_canonical_dims = results[0].canonical_correlations.shape[0] if results else 0
+
+        return CCAAnalysisResults(
+            component_results=results,
+            top_k_components=top_k_components,
+            top_k_scores=top_k_scores,
+            num_components_analyzed=len(results),
+            n_canonical_dims=n_canonical_dims,
+            component_type='mlp_layer'
+        )
+
+    def get_intervention_weights(
+        self,
+        results: CCAAnalysisResults,
+        canonical_dim: int = 0,
+        top_k: int = 20
+    ) -> Dict[Tuple[int, ...], np.ndarray]:
+        """
+        Extract intervention weights from CCA results.
+
+        Instead of ridge coefficients, we use the canonical weights (u vectors)
+        which show how to combine activation features to maximize correlation
+        with demographics.
+
+        Args:
+            results: CCAAnalysisResults from analyze_attention_heads or analyze_mlp_layers
+            canonical_dim: Which canonical dimension to use for intervention (default: 0 = first)
+            top_k: Number of top components to return
+
+        Returns:
+            Dictionary mapping component_id -> canonical_weight_vector
+        """
+        intervention_weights = {}
+
+        for result in results.get_top_components(top_k):
+            component_id = result.component_id
+            # Extract weights for the specified canonical dimension
+            weights = result.left_weights[:, canonical_dim]
+            intervention_weights[component_id] = weights
+
+        return intervention_weights
+
+    def print_top_components(
+        self,
+        results: CCAAnalysisResults,
+        top_k: int = 20
+    ):
+        """Print summary of top-k components"""
+        comp_type = "Attention Heads" if results.component_type == 'attention_head' else "MLP Layers"
+
+        print(f"\nTop {top_k} {comp_type} (by CCA validation score):")
+        print(f"{'Rank':<6} {'Component':<20} {'Val Corr':<12} {'Train Corr':<12} {'Var Exp (Act)':<15} {'Var Exp (Demo)':<15}")
+        print("-" * 90)
+
+        for rank, result in enumerate(results.get_top_components(top_k), 1):
+            if results.component_type == 'attention_head':
+                comp_str = f"L{result.component_id[0]}-H{result.component_id[1]}"
+            else:
+                comp_str = f"Layer {result.component_id[0]}"
+
+            print(f"{rank:<6} {comp_str:<20} "
+                  f"{result.val_score:<12.4f} {result.train_score:<12.4f} "
+                  f"{result.variance_explained_activation:<15.2f} "
+                  f"{result.variance_explained_demographic:<15.2f}")
+
+    def print_canonical_correlations(
+        self,
+        result: CCAResult,
+        n_dims: int = 5
+    ):
+        """Print canonical correlations for a single component"""
+        print(f"\nCanonical Correlations for Component {result.component_id}:")
+        print(f"{'Dimension':<12} {'Correlation':<15}")
+        print("-" * 30)
+
+        for i, corr in enumerate(result.canonical_correlations[:n_dims], 1):
+            print(f"{i:<12} {corr:<15.4f}")
+
+
+def encode_demographic_features(
+    demographic_df,
+    demographic_columns: List[str]
+) -> np.ndarray:
+    """
+    One-hot encode demographic features for CCA.
+
+    Args:
+        demographic_df: DataFrame with demographic columns
+        demographic_columns: List of column names to encode
+
+    Returns:
+        One-hot encoded matrix (n_samples, n_features)
+    """
+    import pandas as pd
+
+    encoded_features = []
+
+    for col in demographic_columns:
+        if col in demographic_df.columns:
+            # One-hot encode this column
+            dummies = pd.get_dummies(demographic_df[col], prefix=col, drop_first=False)
+            encoded_features.append(dummies.values)
+
+    if len(encoded_features) == 0:
+        raise ValueError("No demographic columns found in dataframe")
+
+    # Concatenate all one-hot encoded features
+    return np.hstack(encoded_features)
+
+
+def compare_cca_vs_probing(
+    cca_results: CCAAnalysisResults,
+    probing_results,  # CircuitProbingResults or MLPLayerProbingResults
+    top_k: int = 20
+) -> Dict:
+    """
+    Compare CCA analysis vs. linear probing approach.
+
+    Args:
+        cca_results: Results from CCA analysis
+        probing_results: Results from linear probing
+        top_k: Number of top components to compare
+
+    Returns:
+        Comparison metrics including overlap and rank correlation
+    """
+    # Get top components from each method
+    cca_top = set(cca_results.top_k_components[:top_k])
+
+    # Handle both attention head and MLP layer probing results
+    if hasattr(probing_results, 'top_k_heads'):
+        # Attention head probing
+        probing_top = set(probing_results.top_k_heads[:top_k])
+    else:
+        # MLP layer probing
+        probing_top = set([(layer,) for layer in probing_results.top_k_layers[:top_k]])
+
+    # Calculate overlap
+    overlap = cca_top & probing_top
+    overlap_ratio = len(overlap) / top_k if top_k > 0 else 0.0
+
+    # Rank correlation (if same components appear in both)
+    if len(overlap) > 0:
+        cca_ranks = {comp: rank for rank, comp in enumerate(cca_results.top_k_components)}
+
+        if hasattr(probing_results, 'top_k_heads'):
+            probing_ranks = {comp: rank for rank, comp in enumerate(probing_results.top_k_heads)}
+        else:
+            probing_ranks = {(layer,): rank for rank, layer in enumerate(probing_results.top_k_layers)}
+
+        common_cca_ranks = [cca_ranks[comp] for comp in overlap]
+        common_probing_ranks = [probing_ranks[comp] for comp in overlap]
+
+        rank_corr, rank_p = spearmanr(common_cca_ranks, common_probing_ranks)
+    else:
+        rank_corr, rank_p = 0.0, 1.0
+
+    return {
+        'overlap_count': len(overlap),
+        'overlap_ratio': overlap_ratio,
+        'cca_unique': len(cca_top - probing_top),
+        'probing_unique': len(probing_top - cca_top),
+        'rank_correlation': rank_corr,
+        'rank_p_value': rank_p,
+        'common_components': overlap
+    }

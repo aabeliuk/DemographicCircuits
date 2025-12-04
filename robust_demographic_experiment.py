@@ -154,6 +154,18 @@ def parse_arguments():
     parser.add_argument('--ridge_alpha', type=float, default=DEFAULT_RIDGE_ALPHA,
                        help=f'Ridge regression alpha (default: {DEFAULT_RIDGE_ALPHA})')
 
+    # Analysis method selection
+    parser.add_argument('--analysis_method', type=str,
+                       choices=['probing', 'cca', 'both'],
+                       default='probing',
+                       help='Analysis method: probing (ridge regression), cca (canonical correlation), or both (default: probing)')
+
+    # CCA-specific parameters
+    parser.add_argument('--cca_n_components', type=int, default=None,
+                       help='Number of canonical dimensions for CCA (default: auto, min of activation_dim and demographic_dim)')
+    parser.add_argument('--cca_max_iter', type=int, default=500,
+                       help='Maximum CCA iterations (default: 500)')
+
     # K-fold validation
     parser.add_argument('--n_folds', type=int, default=DEFAULT_N_FOLDS,
                        help=f'Number of folds for cross-validation (default: {DEFAULT_N_FOLDS})')
@@ -770,6 +782,245 @@ def probe_and_select_top_components(
     }
 
 
+def get_demographic_columns(demographic: str) -> List[str]:
+    """
+    Get demographic columns to encode for CCA.
+
+    Includes the target demographic plus common confounders to provide
+    rich demographic context for CCA analysis.
+
+    Args:
+        demographic: Target demographic being analyzed
+
+    Returns:
+        List of demographic column names to include in one-hot encoding
+    """
+    # Include common demographics as confounders
+    base_demographics = ['gender', 'age', 'race', 'education', 'ideology']
+
+    # Ensure target demographic is included
+    if demographic not in base_demographics:
+        base_demographics.append(demographic)
+
+    return base_demographics
+
+
+def run_cca_and_select_top_components(
+    activations: torch.Tensor,
+    demographic_labels: np.ndarray,
+    df: pd.DataFrame,
+    user_indices: np.ndarray,
+    demographic_columns: List[str],
+    model_config: dict,
+    probe_type: str,
+    top_k: int,
+    n_components: int = None,
+    max_iter: int = 500
+) -> dict:
+    """
+    Run CCA analysis and select top components.
+
+    Args:
+        activations: Model activations tensor
+        demographic_labels: Target demographic labels (not used directly, demographics come from df)
+        df: DataFrame with demographic information
+        user_indices: Indices into df for the current samples
+        demographic_columns: List of demographic columns to encode
+        model_config: Model configuration dict with num_layers, num_heads, etc.
+        probe_type: 'attention' or 'mlp'
+        top_k: Number of top components to select
+        n_components: Number of canonical dimensions (default: auto)
+        max_iter: Maximum CCA iterations
+
+    Returns:
+        Dict with:
+            - 'cca_results': CCAAnalysisResults object
+            - 'top_indices': List of top component indices
+            - 'intervention_weights': Dict for intervention engine
+            - 'top_components': Same as top_indices (for compatibility)
+    """
+    from src.cca_analysis import CCAAnalyzer, encode_demographic_features
+
+    print(f"\n  Running CCA analysis...")
+    print(f"    Encoding demographics: {demographic_columns}")
+
+    # One-hot encode demographics
+    demographic_features = encode_demographic_features(
+        df.iloc[user_indices],
+        demographic_columns
+    )
+
+    print(f"    Demographic features shape: {demographic_features.shape}")
+
+    # Initialize analyzer
+    analyzer = CCAAnalyzer(
+        n_components=n_components,
+        max_iter=max_iter,
+        n_folds=3,  # Use 3 folds for CCA internal CV
+        scale_data=True
+    )
+
+    # Run analysis based on probe type
+    if probe_type == 'attention':
+        results = analyzer.analyze_attention_heads(
+            activations,
+            demographic_features,
+            aggregation='mean'
+        )
+    else:  # mlp
+        results = analyzer.analyze_mlp_layers(
+            activations,
+            demographic_features
+        )
+
+    print(f"    CCA analysis complete: {results.num_components_analyzed} components analyzed")
+    print(f"    Top component validation score: {results.top_k_scores[0]:.4f}")
+
+    # Get top components
+    top_components = results.top_k_components[:top_k]
+
+    # Get intervention weights (canonical vectors)
+    intervention_weights = analyzer.get_intervention_weights(
+        results,
+        canonical_dim=0,  # Use first canonical dimension
+        top_k=top_k
+    )
+
+    # Convert to format expected by intervention engine
+    # Need to add intercept=0 and std=1 for compatibility with CircuitInterventionEngine
+    weights_dict = {}
+    for component_id, weights in intervention_weights.items():
+        weights_dict[component_id] = (weights, 0.0, 1.0)
+
+    return {
+        'cca_results': results,
+        'top_indices': top_components,
+        'intervention_weights': weights_dict,
+        'top_components': top_components
+    }
+
+
+def save_cca_results(
+    cca_results,
+    probe_type: str,
+    output_dir: Path,
+    file_prefix: str
+):
+    """
+    Save CCA results to CSV and JSON.
+
+    Args:
+        cca_results: CCAAnalysisResults object
+        probe_type: 'attention' or 'mlp'
+        output_dir: Directory to save results
+        file_prefix: Prefix for output files (e.g., 'gender_fold1')
+    """
+    import json
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save top components with scores
+    results_data = []
+    for result in cca_results.component_results:
+        if probe_type == 'attention':
+            row = {
+                'rank': len(results_data) + 1,
+                'layer': result.component_id[0],
+                'head': result.component_id[1],
+                'val_score': result.val_score,
+                'train_score': result.train_score,
+                'canonical_corr_1': result.canonical_correlations[0],
+                'var_exp_activation': result.variance_explained_activation,
+                'var_exp_demographic': result.variance_explained_demographic,
+                'n_samples_train': result.n_samples_train,
+                'n_samples_val': result.n_samples_val
+            }
+        else:  # mlp
+            row = {
+                'rank': len(results_data) + 1,
+                'layer': result.component_id[0],
+                'val_score': result.val_score,
+                'train_score': result.train_score,
+                'canonical_corr_1': result.canonical_correlations[0],
+                'var_exp_activation': result.variance_explained_activation,
+                'var_exp_demographic': result.variance_explained_demographic,
+                'n_samples_train': result.n_samples_train,
+                'n_samples_val': result.n_samples_val
+            }
+        results_data.append(row)
+
+    df = pd.DataFrame(results_data)
+    csv_path = output_dir / f"{file_prefix}_cca_results.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"  Saved CCA results to {csv_path}")
+
+    # Save metadata
+    metadata = {
+        'n_components_analyzed': cca_results.num_components_analyzed,
+        'n_canonical_dims': cca_results.n_canonical_dims,
+        'component_type': cca_results.component_type
+    }
+    json_path = output_dir / f"{file_prefix}_cca_metadata.json"
+    with open(json_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    print(f"  Saved CCA metadata to {json_path}")
+
+
+def compare_probing_and_cca(
+    probing_results,
+    cca_results,
+    probe_type: str,
+    output_dir: Path,
+    file_prefix: str,
+    top_k: int = 20
+):
+    """
+    Compare CCA and probing results.
+
+    Args:
+        probing_results: CircuitProbingResults or MLPLayerProbingResults
+        cca_results: CCAAnalysisResults
+        probe_type: 'attention' or 'mlp'
+        output_dir: Directory to save comparison results
+        file_prefix: Prefix for output files
+        top_k: Number of top components to compare
+
+    Returns:
+        Comparison dictionary with overlap statistics
+    """
+    import json
+    from src.cca_analysis import compare_cca_vs_probing
+
+    comparison = compare_cca_vs_probing(
+        cca_results,
+        probing_results,
+        top_k=top_k
+    )
+
+    # Save comparison results
+    output_dir.mkdir(parents=True, exist_ok=True)
+    comparison_path = output_dir / f"{file_prefix}_method_comparison.json"
+
+    # Convert sets to lists for JSON serialization
+    comparison_serializable = comparison.copy()
+    comparison_serializable['common_components'] = [
+        list(comp) if isinstance(comp, tuple) else comp
+        for comp in comparison['common_components']
+    ]
+
+    with open(comparison_path, 'w') as f:
+        json.dump(comparison_serializable, f, indent=2)
+
+    print(f"\n  Method Comparison:")
+    print(f"    Overlap: {comparison['overlap_count']}/{top_k} ({comparison['overlap_ratio']*100:.1f}%)")
+    print(f"    CCA unique: {comparison['cca_unique']}")
+    print(f"    Probing unique: {comparison['probing_unique']}")
+    print(f"    Rank correlation: {comparison['rank_correlation']:.3f} (p={comparison['rank_p_value']:.4f})")
+    print(f"  Saved comparison to {comparison_path}")
+
+    return comparison
+
+
 def save_probing_results(
     probing_results,
     probe_type: str,
@@ -1377,46 +1628,161 @@ def run_extraction_phase(args):
                 print(f"\nTrain activations shape: {concatenated_activations.shape}")
                 print(f"Train samples: {len(concatenated_labels)}")
 
-                # Run probing on TRAIN questions only to select top N
-                # Passing demographic, df, and user_indices enables confounder control
-                probing_data = probe_and_select_top_components(
-                    concatenated_activations,
-                    concatenated_labels,
-                    model_config,
-                    args.probe_type,
-                    args.ridge_alpha,
-                    args.top_k_heads,
-                    demographic=demographic,  # For confounder lookup
-                    df=df,  # For extracting confounder values
-                    user_indices=concatenated_user_indices,  # Matching indices
-                    use_confounders=True  # Enable confounder control
-                )
+                # ========================================
+                # ANALYSIS METHOD SELECTION
+                # ========================================
+                probing_data = None
+                cca_data = None
 
-                top_indices = probing_data['top_indices']
+                # Run probing if requested
+                if args.analysis_method in ['probing', 'both']:
+                    print(f"\n{'='*60}")
+                    print("RUNNING PROBING ANALYSIS")
+                    print(f"{'='*60}")
 
-                # Save probing results and visualizations for this fold
-                print(f"\nSaving fold {fold_idx + 1} probing results and visualizations...")
-                results_output_dir = output_dir / 'probing_results'
+                    # Run probing on TRAIN questions only to select top N
+                    # Passing demographic, df, and user_indices enables confounder control
+                    probing_data = probe_and_select_top_components(
+                        concatenated_activations,
+                        concatenated_labels,
+                        model_config,
+                        args.probe_type,
+                        args.ridge_alpha,
+                        args.top_k_heads,
+                        demographic=demographic,  # For confounder lookup
+                        df=df,  # For extracting confounder values
+                        user_indices=concatenated_user_indices,  # Matching indices
+                        use_confounders=True  # Enable confounder control
+                    )
 
-                # Save results to CSV/JSON
-                save_probing_results(
-                    probing_data['probing_results'],
-                    args.probe_type,
-                    results_output_dir,
-                    f"{demographic}_fold{fold_idx + 1}",
-                    args.ridge_alpha
-                )
+                    # Save probing results and visualizations for this fold
+                    print(f"\nSaving fold {fold_idx + 1} probing results and visualizations...")
+                    results_output_dir = output_dir / 'probing_results'
 
-                # Create and save visualization
-                plot_spearman_correlations(
-                    probing_data['probing_results'],
-                    args.probe_type,
-                    results_output_dir,
-                    demographic,
-                    args.top_k_heads,
-                    run_id=args.run_id,
-                    fold_idx=fold_idx
-                )
+                    # Save results to CSV/JSON
+                    save_probing_results(
+                        probing_data['probing_results'],
+                        args.probe_type,
+                        results_output_dir,
+                        f"{demographic}_fold{fold_idx + 1}",
+                        args.ridge_alpha
+                    )
+
+                    # Create and save visualization
+                    plot_spearman_correlations(
+                        probing_data['probing_results'],
+                        args.probe_type,
+                        results_output_dir,
+                        demographic,
+                        args.top_k_heads,
+                        run_id=args.run_id,
+                        fold_idx=fold_idx
+                    )
+
+                # Run CCA if requested
+                if args.analysis_method in ['cca', 'both']:
+                    print(f"\n{'='*60}")
+                    print("RUNNING CCA ANALYSIS")
+                    print(f"{'='*60}")
+
+                    # Run CCA analysis
+                    cca_data = run_cca_and_select_top_components(
+                        concatenated_activations,
+                        concatenated_labels,
+                        df,
+                        concatenated_user_indices,
+                        demographic_columns=get_demographic_columns(demographic),
+                        model_config=model_config,
+                        probe_type=args.probe_type,
+                        top_k=args.top_k_heads,
+                        n_components=args.cca_n_components,
+                        max_iter=args.cca_max_iter
+                    )
+
+                    # Save CCA results
+                    print(f"\nSaving fold {fold_idx + 1} CCA results and visualizations...")
+                    results_output_dir = output_dir / 'cca_results'
+
+                    save_cca_results(
+                        cca_data['cca_results'],
+                        args.probe_type,
+                        results_output_dir,
+                        f"{demographic}_fold{fold_idx + 1}"
+                    )
+
+                    # Create CCA visualizations
+                    from src.cca_visualizations import (
+                        plot_canonical_correlations,
+                        plot_demographic_loadings,
+                        plot_component_rankings
+                    )
+
+                    plot_canonical_correlations(
+                        cca_data['cca_results'],
+                        results_output_dir,
+                        demographic,
+                        args.run_id,
+                        fold_idx
+                    )
+
+                    plot_demographic_loadings(
+                        cca_data['cca_results'],
+                        results_output_dir,
+                        demographic,
+                        args.run_id,
+                        fold_idx,
+                        top_k=5
+                    )
+
+                    plot_component_rankings(
+                        cca_data['cca_results'],
+                        args.probe_type,
+                        results_output_dir,
+                        demographic,
+                        args.run_id,
+                        fold_idx,
+                        top_k=args.top_k_heads
+                    )
+
+                # Compare methods if both were run
+                if args.analysis_method == 'both':
+                    print(f"\n{'='*60}")
+                    print("COMPARING METHODS")
+                    print(f"{'='*60}")
+
+                    results_output_dir = output_dir / 'method_comparison'
+
+                    comparison = compare_probing_and_cca(
+                        probing_data['probing_results'],
+                        cca_data['cca_results'],
+                        args.probe_type,
+                        results_output_dir,
+                        f"{demographic}_fold{fold_idx + 1}",
+                        top_k=args.top_k_heads
+                    )
+
+                    # Create comparison visualization
+                    from src.cca_visualizations import plot_method_comparison
+                    plot_method_comparison(
+                        probing_data['probing_results'],
+                        cca_data['cca_results'],
+                        comparison,
+                        args.probe_type,
+                        results_output_dir,
+                        demographic,
+                        args.run_id,
+                        fold_idx,
+                        top_k=args.top_k_heads
+                    )
+
+                # Select top_indices based on analysis method
+                if args.analysis_method == 'probing':
+                    top_indices = probing_data['top_indices']
+                elif args.analysis_method == 'cca':
+                    top_indices = cca_data['top_indices']
+                else:  # 'both' - default to probing for intervention
+                    top_indices = probing_data['top_indices']
+                    print(f"\n  Using probing top-k for intervention (can change to CCA in future)")
 
                 # Clean up concatenated data to free memory
                 del concatenated_activations
