@@ -545,7 +545,8 @@ def encode_demographics_mixed(
     demographic_df,
     categorical_columns: List[str] = None,
     ordinal_columns: List[str] = None,
-    ordinal_mappings: dict = None
+    ordinal_mappings: dict = None,
+    fixed_categories: dict = None
 ) -> np.ndarray:
     """
     Encode demographics with mixed strategy: one-hot for categorical, ordinal for ordered.
@@ -556,6 +557,9 @@ def encode_demographics_mixed(
         ordinal_columns: Columns to encode as ordinal (e.g., ['age', 'income', 'ideology'])
         ordinal_mappings: Optional dict mapping column -> {value: numeric_code}
                          If not provided, will use alphabetical ordering
+        fixed_categories: Optional dict mapping column -> list of all possible values
+                         Ensures consistent encoding across different data subsets
+                         Example: {'race': ['White', 'Black', 'Hispanic', 'Asian', 'Other']}
 
     Returns:
         Mixed encoded matrix (n_samples, n_features)
@@ -568,6 +572,10 @@ def encode_demographics_mixed(
         ...     ordinal_mappings={
         ...         'age': {'Young Adult': 0, 'Adult': 1, 'Senior': 2},
         ...         'ideology': {'Left': 0, 'Center': 1, 'Right': 2}
+        ...     },
+        ...     fixed_categories={
+        ...         'gender': ['Man', 'Woman'],
+        ...         'race': ['White', 'Black', 'Hispanic', 'Asian', 'Other']
         ...     }
         ... )
     """
@@ -583,10 +591,20 @@ def encode_demographics_mixed(
 
     encoded_features = []
 
-    # One-hot encode categorical features
+    # One-hot encode categorical features with FIXED categories
     for col in categorical_columns:
         if col in demographic_df.columns:
-            dummies = pd.get_dummies(demographic_df[col], prefix=col, drop_first=False)
+            if fixed_categories and col in fixed_categories:
+                # Use pd.Categorical to ensure all categories present
+                categorical_data = pd.Categorical(
+                    demographic_df[col],
+                    categories=fixed_categories[col]
+                )
+                dummies = pd.get_dummies(categorical_data, prefix=col, drop_first=False)
+            else:
+                # Fallback: standard one-hot encoding (may have inconsistent dimensions)
+                dummies = pd.get_dummies(demographic_df[col], prefix=col, drop_first=False)
+
             encoded_features.append(dummies.values)
 
     # Ordinal encode ordered features
