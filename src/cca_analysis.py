@@ -229,7 +229,7 @@ class CCAAnalyzer:
         per_head_weights: List[np.ndarray],
         scaler_X: StandardScaler,
         scaler_Y: StandardScaler
-    ) -> Tuple[List[float], List[float]]:
+    ) -> Tuple[List[float], List[float], List[float]]:
         """
         Compute per-head variance explained and canonical correlations from batch CCA result.
 
@@ -243,14 +243,16 @@ class CCAAnalyzer:
             scaler_Y: Fitted scaler for demographic features
 
         Returns:
-            var_explained_per_head: List of variance explained percentages
+            var_explained_per_head: List of variance explained percentages for activations
             canonical_corr_per_head: List of first canonical correlations for each head
+            var_exp_demographic_per_head: List of variance explained percentages for demographics
         """
         n_samples, n_heads, head_dim = layer_activations.shape
         n_components = X_canonical.shape[1]
 
         var_explained_per_head = []
         canonical_corr_per_head = []
+        var_exp_demographic_per_head = []
 
         # Get demographic canonical variate (first component)
         Y_c_first = Y_canonical[:, 0]
@@ -287,7 +289,13 @@ class CCAAnalyzer:
             total_var = np.var(head_activations_scaled, axis=0).sum()
             var_explained_per_head.append(var_exp / total_var * 100)
 
-        return var_explained_per_head, canonical_corr_per_head
+            # Compute per-head demographic variance explained
+            # Use R² approximation: correlation squared gives proportion of variance explained
+            # This is the contribution of this head to explaining demographic variance
+            var_exp_demo_head = corr ** 2 * 100
+            var_exp_demographic_per_head.append(var_exp_demo_head)
+
+        return var_explained_per_head, canonical_corr_per_head, var_exp_demographic_per_head
 
     def _analyze_layer_batch(
         self,
@@ -483,7 +491,7 @@ class CCAAnalyzer:
         )
 
         # Compute per-head variance explained
-        var_explained_per_head, _ = self._compute_per_head_metrics_from_batch(
+        var_explained_per_head, _, var_exp_demo_per_head = self._compute_per_head_metrics_from_batch(
             layer_activations, demographic_features, X_c, Y_c,
             per_head_weights, scaler_X, scaler_Y
         )
@@ -499,7 +507,7 @@ class CCAAnalyzer:
                 left_loadings=per_head_loadings[head],
                 right_loadings=batch_right_loadings,  # Shared demographic loadings
                 variance_explained_activation=var_explained_per_head[head],
-                variance_explained_demographic=var_exp_demo / n_heads,  # Distribute evenly
+                variance_explained_demographic=var_exp_demo_per_head[head],  # Per-head value (R² approximation)
                 train_score=np.mean(per_head_train_scores[head]) if per_head_train_scores[head] else 0.0,
                 val_score=np.mean(per_head_val_scores[head]) if per_head_val_scores[head] else 0.0,
                 n_samples_train=int(np.mean(n_train_samples)),
