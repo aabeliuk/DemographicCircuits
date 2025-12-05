@@ -3650,8 +3650,38 @@ def run_intervention_phase(args):
                             f"This likely means extractions were run with different random seeds or folds."
                         )
 
-                # Get intervention weights from probing results and select top-k per demographic
-                all_weights = extraction_data['intervention_weights']
+                # Check if CCA results or ridge probing results
+                if 'probing_results' in extraction_data and hasattr(extraction_data['probing_results'], 'component_results'):
+                    # CCA extraction: extract weights from CCAAnalysisResults
+                    from src.cca_analysis import CCAAnalyzer
+
+                    cca_results = extraction_data['probing_results']
+                    analyzer = CCAAnalyzer()
+
+                    # Extract intervention weights from canonical dimension 0
+                    intervention_weights_raw = analyzer.get_intervention_weights(
+                        cca_results,
+                        canonical_dim=0,
+                        top_k=min(len(cca_results.component_results), args.top_k_heads * 3)  # Get extra to allow selection
+                    )
+
+                    # Convert to intervention format: (weights, intercept, std)
+                    all_weights = {}
+                    for component_id, weights in intervention_weights_raw.items():
+                        all_weights[component_id] = (weights, 0.0, 1.0)
+
+                    print(f"  Loaded {demographic}: extracted {len(all_weights)} CCA intervention weights")
+
+                elif 'intervention_weights' in extraction_data:
+                    # Ridge probing extraction: use directly
+                    all_weights = extraction_data['intervention_weights']
+                    print(f"  Loaded {demographic}: using {len(all_weights)} ridge intervention weights")
+
+                else:
+                    raise ValueError(
+                        f"Extraction file {fold_file} does not contain intervention weights or CCA results.\n"
+                        f"Please re-run extraction phase."
+                    )
 
                 # Sort by coefficient magnitude and select top-k for THIS demographic
                 sorted_demo_weights = dict(sorted(
@@ -3664,7 +3694,7 @@ def run_intervention_phase(args):
                 top_k_demo_weights = dict(list(sorted_demo_weights.items())[:args.top_k_heads])
                 demographic_weights_dict[demographic] = top_k_demo_weights
 
-                print(f"  Loaded {demographic}: selected top {len(top_k_demo_weights)} of {len(all_weights)} components")
+                print(f"  Selected top {len(top_k_demo_weights)} components for intervention")
 
             print(f"\nTest questions ({len(test_questions)}): {test_questions}")
 
@@ -4217,14 +4247,42 @@ def run_intervention_phase(args):
             print(f"\nTraining data shape: {train_activations.shape}")
             print(f"Training labels: {len(train_labels)}")
 
+            # Check if this is a CCA extraction (use fold-specific or global extraction_data)
+            current_extraction_data = extraction_data if using_fold_specific else global_extraction_data
+            is_cca_extraction = ('probing_results' in current_extraction_data and
+                                hasattr(current_extraction_data['probing_results'], 'component_results'))
+
             # Train intervention weights
-            if has_preselected_components:
-                # Activations are already filtered, just train weights on pre-selected components
+            if is_cca_extraction:
+                # CCA extraction: extract weights directly from saved results
+                from src.cca_analysis import CCAAnalyzer
+
+                print(f"\nDetected CCA extraction, extracting intervention weights...")
+                cca_results = current_extraction_data['probing_results']
+                analyzer = CCAAnalyzer()
+
+                intervention_weights_raw = analyzer.get_intervention_weights(
+                    cca_results,
+                    canonical_dim=0,
+                    top_k=args.top_k_heads
+                )
+
+                # Convert to intervention format
+                intervention_weights = {}
+                for component_id, weights in intervention_weights_raw.items():
+                    intervention_weights[component_id] = (weights, 0.0, 1.0)
+
+                print(f"Extracted {len(intervention_weights)} CCA intervention weights")
+
+            elif has_preselected_components:
+                # Ridge probing with pre-selected components
                 print(f"\nTraining weights on pre-selected {len(top_indices)} components (will use top {args.top_k_heads})...")
                 intervention_weights = train_weights_on_prefiltered_activations(
                     train_activations, train_labels, top_indices,
                     args.probe_type, args.ridge_alpha, top_k=args.top_k_heads
                 )
+                print(f"Extracted {len(intervention_weights)} ridge intervention weights")
+
             else:
                 # Full probing: select top components and train weights
                 print(f"\nTraining probes on {len(train_questions)} questions...")
@@ -4237,8 +4295,7 @@ def run_intervention_phase(args):
                     use_confounders=True
                 )
                 intervention_weights = probing_data['intervention_weights']
-
-            print(f"Extracted {len(intervention_weights)} intervention weights")
+                print(f"Extracted {len(intervention_weights)} ridge intervention weights")
 
             # Evaluate on test fold
             print(f"\nEvaluating on {len(test_questions)} test questions...")
