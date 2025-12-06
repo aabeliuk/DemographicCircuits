@@ -175,6 +175,11 @@ def parse_arguments():
                        help=f'Number of top heads/layers to use (default: {DEFAULT_TOP_K_HEADS})')
     parser.add_argument('--intervention_strength', type=float, default=DEFAULT_INTERVENTION_STRENGTH,
                        help=f'Intervention strength (default: {DEFAULT_INTERVENTION_STRENGTH})')
+    parser.add_argument('--intervention_method', type=str,
+                       choices=['auto', 'cca', 'probing'],
+                       default='auto',
+                       help='Intervention method: auto (detect from extraction), cca (use CCA weights), '
+                            'probing (use ridge regression weights). Default: auto')
     parser.add_argument('--eval_sample_size', type=int, default=DEFAULT_EVAL_SAMPLE_SIZE,
                        help=f'Sample size per test question (default: {DEFAULT_EVAL_SAMPLE_SIZE})')
 
@@ -3650,38 +3655,67 @@ def run_intervention_phase(args):
                             f"This likely means extractions were run with different random seeds or folds."
                         )
 
-                # Check if CCA results or ridge probing results
-                if 'probing_results' in extraction_data and hasattr(extraction_data['probing_results'], 'component_results'):
+                # Determine which intervention method to use
+                cca_available = ('probing_results' in extraction_data and
+                                hasattr(extraction_data['probing_results'], 'component_results'))
+                ridge_available = 'intervention_weights' in extraction_data
+
+                # Choose method based on args.intervention_method
+                if args.intervention_method == 'cca':
+                    # Force CCA
+                    if not cca_available:
+                        raise ValueError(
+                            f"--intervention_method=cca specified but extraction file {fold_file} "
+                            f"does not contain CCA results. Re-run extraction with --analysis_method cca."
+                        )
+                    use_cca = True
+
+                elif args.intervention_method == 'probing':
+                    # Force ridge probing
+                    if not ridge_available:
+                        raise ValueError(
+                            f"--intervention_method=probing specified but extraction file {fold_file} "
+                            f"does not contain ridge intervention weights. Re-run extraction with --analysis_method probing."
+                        )
+                    use_cca = False
+
+                else:  # args.intervention_method == 'auto'
+                    # Automatic detection: prefer CCA if available
+                    if cca_available:
+                        use_cca = True
+                        print(f"  Auto-detected CCA results for {demographic}")
+                    elif ridge_available:
+                        use_cca = False
+                        print(f"  Auto-detected ridge probing results for {demographic}")
+                    else:
+                        raise ValueError(
+                            f"Extraction file {fold_file} does not contain intervention weights or CCA results.\n"
+                            f"Please re-run extraction phase."
+                        )
+
+                # Extract weights based on chosen method
+                if use_cca:
                     # CCA extraction: extract weights from CCAAnalysisResults
                     from src.cca_analysis import CCAAnalyzer
 
                     cca_results = extraction_data['probing_results']
                     analyzer = CCAAnalyzer()
 
-                    # Extract intervention weights from canonical dimension 0
                     intervention_weights_raw = analyzer.get_intervention_weights(
                         cca_results,
                         canonical_dim=0,
-                        top_k=min(len(cca_results.component_results), args.top_k_heads * 3)  # Get extra to allow selection
+                        top_k=min(len(cca_results.component_results), args.top_k_heads * 3)
                     )
 
-                    # Convert to intervention format: (weights, intercept, std)
                     all_weights = {}
                     for component_id, weights in intervention_weights_raw.items():
                         all_weights[component_id] = (weights, 0.0, 1.0)
 
                     print(f"  Loaded {demographic}: extracted {len(all_weights)} CCA intervention weights")
 
-                elif 'intervention_weights' in extraction_data:
-                    # Ridge probing extraction: use directly
+                else:  # use ridge
                     all_weights = extraction_data['intervention_weights']
                     print(f"  Loaded {demographic}: using {len(all_weights)} ridge intervention weights")
-
-                else:
-                    raise ValueError(
-                        f"Extraction file {fold_file} does not contain intervention weights or CCA results.\n"
-                        f"Please re-run extraction phase."
-                    )
 
                 # Sort by coefficient magnitude and select top-k for THIS demographic
                 sorted_demo_weights = dict(sorted(
@@ -4249,15 +4283,41 @@ def run_intervention_phase(args):
 
             # Check if this is a CCA extraction (use fold-specific or global extraction_data)
             current_extraction_data = extraction_data if using_fold_specific else global_extraction_data
-            is_cca_extraction = ('probing_results' in current_extraction_data and
-                                hasattr(current_extraction_data['probing_results'], 'component_results'))
 
-            # Train intervention weights
-            if is_cca_extraction:
+            # Determine which intervention method to use
+            cca_available = ('probing_results' in current_extraction_data and
+                            hasattr(current_extraction_data['probing_results'], 'component_results'))
+            ridge_available = has_preselected_components or (not cca_available)  # Can always train ridge on-the-fly
+
+            # Choose method based on args.intervention_method
+            if args.intervention_method == 'cca':
+                # Force CCA
+                if not cca_available:
+                    raise ValueError(
+                        f"--intervention_method=cca specified but extraction does not contain CCA results. "
+                        f"Re-run extraction with --analysis_method cca."
+                    )
+                use_cca = True
+
+            elif args.intervention_method == 'probing':
+                # Force ridge probing
+                use_cca = False
+
+            else:  # args.intervention_method == 'auto'
+                # Automatic detection: prefer CCA if available
+                if cca_available:
+                    use_cca = True
+                    print(f"Auto-detected CCA results")
+                else:
+                    use_cca = False
+                    print(f"Auto-detected ridge probing (or will train on-the-fly)")
+
+            # Extract/train weights based on chosen method
+            if use_cca:
                 # CCA extraction: extract weights directly from saved results
                 from src.cca_analysis import CCAAnalyzer
 
-                print(f"\nDetected CCA extraction, extracting intervention weights...")
+                print(f"\nUsing CCA intervention weights...")
                 cca_results = current_extraction_data['probing_results']
                 analyzer = CCAAnalyzer()
 
@@ -4267,7 +4327,6 @@ def run_intervention_phase(args):
                     top_k=args.top_k_heads
                 )
 
-                # Convert to intervention format
                 intervention_weights = {}
                 for component_id, weights in intervention_weights_raw.items():
                     intervention_weights[component_id] = (weights, 0.0, 1.0)
@@ -4276,7 +4335,7 @@ def run_intervention_phase(args):
 
             elif has_preselected_components:
                 # Ridge probing with pre-selected components
-                print(f"\nTraining weights on pre-selected {len(top_indices)} components (will use top {args.top_k_heads})...")
+                print(f"\nUsing ridge intervention weights on pre-selected components...")
                 intervention_weights = train_weights_on_prefiltered_activations(
                     train_activations, train_labels, top_indices,
                     args.probe_type, args.ridge_alpha, top_k=args.top_k_heads
@@ -4285,7 +4344,7 @@ def run_intervention_phase(args):
 
             else:
                 # Full probing: select top components and train weights
-                print(f"\nTraining probes on {len(train_questions)} questions...")
+                print(f"\nTraining ridge probes on {len(train_questions)} questions...")
                 probing_data = probe_and_select_top_components(
                     train_activations, train_labels, model_config,
                     args.probe_type, args.ridge_alpha, args.top_k_heads,
