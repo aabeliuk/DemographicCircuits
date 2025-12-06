@@ -1810,6 +1810,7 @@ def run_cca_extraction_phase(args, model, tokenizer, df, output_dir, model_confi
             'top_components': top_components,
             'top_k': args.top_k_heads,
             'question_extractions': fold_question_extractions,
+            'cca_results': cca_results,  # Save full CCAAnalysisResults object with weight vectors
             'cca_results_summary': {
                 'n_components_analyzed': cca_results.num_components_analyzed,
                 'n_canonical_dims': cca_results.n_canonical_dims,
@@ -5037,16 +5038,17 @@ def run_intervention_phase_cca(args):
             extraction_data = pickle.load(f)
 
         # Verify it's a CCA extraction
-        if 'probing_results' not in extraction_data or not hasattr(extraction_data['probing_results'], 'component_results'):
+        if 'cca_results' not in extraction_data:
             raise ValueError(
                 f"Extraction file {extraction_file} does not contain CCA results.\n"
-                f"Expected 'probing_results' with CCAAnalysisResults object."
+                f"Expected 'cca_results' with CCAAnalysisResults object.\n"
+                f"Please re-run extraction phase to generate file with full CCA results."
             )
 
         # Extract test questions and CCA results
         test_questions = extraction_data['test_questions']
         train_questions = extraction_data['train_questions']
-        cca_results = extraction_data['probing_results']
+        cca_results = extraction_data['cca_results']
         question_extractions = extraction_data['question_extractions']
 
         # Get category names from first question
