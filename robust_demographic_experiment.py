@@ -5303,13 +5303,10 @@ def run_intervention_phase_cca(args):
         target_demographics_dict = None
 
         if args.intervention_mode in ['profile', 'targeted']:
-            # Get demographic columns from the user_df stored in extraction
+            # Get demographic columns from main DataFrame
             # CCA saves demographic_features as np.ndarray, not dict, so we can't get column names from it
-            first_question = list(question_extractions.keys())[0]
-            user_df = question_extractions[first_question]['user_df']
-
-            # Get demographic columns in same order as when encoded
-            demographic_columns = [col for col in user_df.columns
+            # The extraction file doesn't save user_df, so we get columns from the main df
+            demographic_columns = [col for col in df.columns
                                   if col.startswith(('gender_', 'age_', 'race_', 'education_', 'ideology_'))]
 
             print(f"        Found {len(demographic_columns)} demographic columns")
