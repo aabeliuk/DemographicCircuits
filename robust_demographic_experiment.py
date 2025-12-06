@@ -5051,9 +5051,9 @@ def run_intervention_phase_cca(args):
         cca_results = extraction_data['cca_results']
         question_extractions = extraction_data['question_extractions']
 
-        # Get category names from first question
-        first_question = list(question_extractions.keys())[0]
-        category_names = question_extractions[first_question]['category_names']
+        # Get category names from demographics list
+        # For CCA all-demographics, category names are the demographic attributes
+        category_names = extraction_data.get('demographics', ['all_demographics'])
 
         print(f"Train questions ({len(train_questions)}): {train_questions}")
         print(f"Test questions ({len(test_questions)}): {test_questions}")
