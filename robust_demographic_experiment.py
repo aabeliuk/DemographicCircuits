@@ -4966,6 +4966,244 @@ def run_intervention_phase(args):
               f"({metrics['improvement_mean']:+.1f} points)")
 
 
+def run_intervention_phase_cca(args):
+    """
+    Run intervention phase using CCA all-demographics extraction.
+
+    This function handles CCA extractions where ALL demographics were
+    analyzed together in a single file, producing joint canonical
+    directions that encode intersectional patterns.
+
+    Args:
+        args: Command-line arguments
+    """
+    print("="*80)
+    print("CCA ALL-DEMOGRAPHICS INTERVENTION PHASE")
+    print("="*80)
+    print(f"Top-K: {args.top_k_heads}")
+    print(f"Intervention strength: {args.intervention_strength}")
+    print(f"Run ID: {args.run_id}")
+    print("="*80 + "\n")
+
+    # Set random seeds
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    # Setup
+    extraction_dir = Path(args.output_dir) / 'extractions'
+    results_dir = Path(args.output_dir) / 'intervention_results'
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find CCA extraction file
+    # Pattern: cca_all_demographics_attention_RUNID_fold1_extractions.pkl
+    pattern = f"cca_all_demographics_{args.probe_type}_{args.run_id}_fold*_extractions.pkl"
+    extraction_files = list(extraction_dir.glob(pattern))
+
+    if len(extraction_files) == 0:
+        raise FileNotFoundError(
+            f"No CCA all-demographics extraction file found matching: {pattern}\n"
+            f"Looking in: {extraction_dir}\n"
+            f"Run extraction phase first with: --analysis_method cca --demographics all_demographics"
+        )
+
+    # Load data
+    print("Loading ANES data...")
+    df = load_anes_data(args.anes_data_path)
+
+    # Load model
+    print(f"\nLoading model: {args.model}")
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        torch_dtype=torch.float16,
+        device_map=args.device,
+        low_cpu_mem_usage=True
+    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer.pad_token = tokenizer.eos_token
+    print(f"Model loaded on device: {args.device}")
+
+    # Process each fold file
+    fold_results = []
+
+    for fold_idx, extraction_file in enumerate(sorted(extraction_files)):
+        print(f"\n{'-'*80}")
+        print(f"FOLD {fold_idx + 1}/{len(extraction_files)}")
+        print(f"{'-'*80}")
+        print(f"Loading: {extraction_file.name}")
+
+        # Load extraction
+        with open(extraction_file, 'rb') as f:
+            extraction_data = pickle.load(f)
+
+        # Verify it's a CCA extraction
+        if 'probing_results' not in extraction_data or not hasattr(extraction_data['probing_results'], 'component_results'):
+            raise ValueError(
+                f"Extraction file {extraction_file} does not contain CCA results.\n"
+                f"Expected 'probing_results' with CCAAnalysisResults object."
+            )
+
+        # Extract test questions and CCA results
+        test_questions = extraction_data['test_questions']
+        train_questions = extraction_data['train_questions']
+        cca_results = extraction_data['probing_results']
+        question_extractions = extraction_data['question_extractions']
+
+        # Get category names from first question
+        first_question = list(question_extractions.keys())[0]
+        category_names = question_extractions[first_question]['category_names']
+
+        print(f"Train questions ({len(train_questions)}): {train_questions}")
+        print(f"Test questions ({len(test_questions)}): {test_questions}")
+        print(f"CCA components analyzed: {cca_results.num_components_analyzed}")
+
+        # Extract intervention weights from CCA
+        from src.cca_analysis import CCAAnalyzer
+
+        print(f"\nExtracting top {args.top_k_heads} CCA intervention weights...")
+        analyzer = CCAAnalyzer()
+
+        intervention_weights_raw = analyzer.get_intervention_weights(
+            cca_results,
+            canonical_dim=0,
+            top_k=args.top_k_heads
+        )
+
+        # Convert to intervention format
+        intervention_weights = {}
+        for component_id, weights in intervention_weights_raw.items():
+            intervention_weights[component_id] = (weights, 0.0, 1.0)
+
+        print(f"Extracted {len(intervention_weights)} CCA intervention weights")
+
+        # Evaluate intervention on test questions
+        print(f"\nEvaluating on {len(test_questions)} test questions...")
+
+        # Use existing evaluate_intervention_on_fold function
+        # (works for any intervention weights)
+        test_results = evaluate_intervention_on_fold(
+            model, tokenizer, df, test_questions,
+            demographic='all_demographics',  # Special demographic name
+            category_names=category_names,
+            intervention_weights=intervention_weights,
+            device=args.device,
+            probe_type=args.probe_type,
+            intervention_strength=args.intervention_strength,
+            eval_sample_size=args.eval_sample_size,
+            prompt_style=args.prompt_style,
+            results_dir=results_dir,
+            run_id=args.run_id,
+            top_k_heads=args.top_k_heads
+        )
+
+        # Store fold results
+        fold_results.append({
+            'fold': fold_idx,
+            'test_questions': test_questions,
+            'test_results': test_results
+        })
+
+        # Print fold summary
+        if test_results:
+            fold_baseline = np.mean([r['baseline_accuracy'] for r in test_results.values()])
+            fold_intervention = np.mean([r['intervention_accuracy'] for r in test_results.values()])
+            fold_improvement = np.mean([r['improvement'] for r in test_results.values()])
+
+            print(f"\nFold {fold_idx + 1} Results:")
+            print(f"  Baseline:     {fold_baseline*100:.1f}%")
+            print(f"  Intervention: {fold_intervention*100:.1f}%")
+            print(f"  Improvement:  {fold_improvement:+.1f} points")
+
+    # Aggregate across folds
+    print(f"\n{'='*80}")
+    print(f"AGGREGATING RESULTS ACROSS {len(fold_results)} FOLDS")
+    print(f"{'='*80}")
+
+    # Calculate overall metrics (same as regular intervention phase)
+    fold_baseline_accs = []
+    fold_intervention_accs = []
+    fold_improvements = []
+
+    for fold_data in fold_results:
+        if fold_data['test_results']:
+            fold_baseline = np.mean([r['baseline_accuracy'] for r in fold_data['test_results'].values()])
+            fold_intervention = np.mean([r['intervention_accuracy'] for r in fold_data['test_results'].values()])
+            fold_improvement = np.mean([r['improvement'] for r in fold_data['test_results'].values()])
+
+            fold_baseline_accs.append(fold_baseline)
+            fold_intervention_accs.append(fold_intervention)
+            fold_improvements.append(fold_improvement)
+
+    n_folds = len(fold_baseline_accs)
+    overall_baseline_mean = np.mean(fold_baseline_accs)
+    overall_baseline_std = np.std(fold_baseline_accs, ddof=1) if n_folds > 1 else None
+    overall_intervention_mean = np.mean(fold_intervention_accs)
+    overall_intervention_std = np.std(fold_intervention_accs, ddof=1) if n_folds > 1 else None
+    overall_improvement_mean = np.mean(fold_improvements)
+    overall_improvement_std = np.std(fold_improvements, ddof=1) if n_folds > 1 else None
+
+    print(f"\nOverall Results (mean ± std across {n_folds} folds):")
+    if overall_baseline_std is not None:
+        print(f"  Baseline:     {overall_baseline_mean*100:.1f}% ± {overall_baseline_std*100:.1f}%")
+        print(f"  Intervention: {overall_intervention_mean*100:.1f}% ± {overall_intervention_std*100:.1f}%")
+        print(f"  Improvement:  {overall_improvement_mean:+.1f} ± {overall_improvement_std:.1f} points")
+    else:
+        print(f"  Baseline:     {overall_baseline_mean*100:.1f}%")
+        print(f"  Intervention: {overall_intervention_mean*100:.1f}%")
+        print(f"  Improvement:  {overall_improvement_mean:+.1f} points")
+
+    # Save results
+    cca_results_data = {
+        'mode': 'cca_all_demographics',
+        'probe_type': args.probe_type,
+        'run_id': args.run_id,
+        'n_folds': n_folds,
+        'top_k_heads': args.top_k_heads,
+        'intervention_strength': args.intervention_strength,
+        'fold_results': fold_results,
+        'overall_metrics': {
+            'baseline_accuracy_mean': overall_baseline_mean,
+            'baseline_accuracy_std': overall_baseline_std,
+            'intervention_accuracy_mean': overall_intervention_mean,
+            'intervention_accuracy_std': overall_intervention_std,
+            'improvement_mean': overall_improvement_mean,
+            'improvement_std': overall_improvement_std,
+        }
+    }
+
+    # Save full results
+    results_file = results_dir / f"cca_all_demographics_{args.probe_type}_{args.run_id}_intervention_results.pkl"
+    with open(results_file, 'wb') as f:
+        pickle.dump(cca_results_data, f)
+    print(f"\nFull results saved: {results_file}")
+
+    # Save summary JSON
+    summary_file = results_dir / f"cca_all_demographics_{args.probe_type}_{args.run_id}_summary.json"
+    summary_data = {
+        'experiment': {
+            'mode': 'cca_all_demographics',
+            'probe_type': args.probe_type,
+            'run_id': args.run_id,
+            'top_k_heads': args.top_k_heads,
+            'intervention_strength': args.intervention_strength,
+            'n_folds': n_folds
+        },
+        'results': {
+            'baseline_accuracy_mean': overall_baseline_mean,
+            'baseline_accuracy_std': overall_baseline_std,
+            'intervention_accuracy_mean': overall_intervention_mean,
+            'intervention_accuracy_std': overall_intervention_std,
+            'improvement_mean': overall_improvement_mean,
+            'improvement_std': overall_improvement_std
+        },
+        'timestamp': datetime.now().isoformat()
+    }
+
+    with open(summary_file, 'w') as f:
+        json.dump(summary_data, f, indent=2)
+    print(f"Summary saved: {summary_file}")
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -4995,7 +5233,17 @@ def main():
         run_extraction_phase(args)
 
     if args.phase in ['intervene', 'both']:
-        run_intervention_phase(args)
+        # Check if this is a CCA all-demographics intervention
+        # (single demographic called 'all_demographics' with CCA extraction)
+        if (args.demographics and
+            len(args.demographics) == 1 and
+            args.demographics[0] == 'all_demographics' and
+            args.analysis_method == 'cca'):
+
+            print("Detected CCA all-demographics mode")
+            run_intervention_phase_cca(args)
+        else:
+            run_intervention_phase(args)
 
     print("\n" + "="*80)
     print("EXPERIMENT COMPLETE")
