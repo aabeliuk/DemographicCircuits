@@ -5085,7 +5085,7 @@ def run_intervention_phase_cca(args):
         # (works for any intervention weights)
         test_results = evaluate_intervention_on_fold(
             model, tokenizer, df, test_questions,
-            demographic='all', 
+            demographic_attr='all_demographics',
             category_names=category_names,
             intervention_weights=intervention_weights,
             device=args.device,
@@ -5093,7 +5093,7 @@ def run_intervention_phase_cca(args):
             intervention_strength=args.intervention_strength,
             eval_sample_size=args.eval_sample_size,
             prompt_style=args.prompt_style,
-            results_dir=results_dir,
+            output_dir=results_dir,
             run_id=args.run_id,
             top_k_heads=args.top_k_heads
         )
