@@ -3034,9 +3034,21 @@ def evaluate_intervention_on_fold(
         # This ensures baseline predictions are unaffected by intervention
         user_data_by_category = {}  # Store user data for phase 2
 
-        for category_idx, category in enumerate(category_names):
+        # Handle all-demographics mode differently (no category splitting)
+        if demographic_attr == 'all_demographics':
+            # Single category containing all users
+            category_names_to_use = ['all_demographics']
+        else:
+            category_names_to_use = category_names
+
+        for category_idx, category in enumerate(category_names_to_use):
             # Filter users in this category
-            category_users = test_users[test_users[demographic_attr] == category]
+            if demographic_attr == 'all_demographics':
+                # All users in one group
+                category_users = test_users
+            else:
+                # Standard filtering by demographic value
+                category_users = test_users[test_users[demographic_attr] == category]
 
             if len(category_users) == 0:
                 continue
@@ -5060,9 +5072,9 @@ def run_intervention_phase_cca(args):
         cca_results = extraction_data['cca_results']
         question_extractions = extraction_data['question_extractions']
 
-        # Get category names from demographics list
-        # For CCA all-demographics, category names are the demographic attributes
-        category_names = extraction_data.get('demographics', ['all_demographics'])
+        # For CCA all-demographics intervention, we have a single weight set
+        # that applies to all users (not separate weights per demographic category)
+        category_names = ['all_demographics']
 
         print(f"Train questions ({len(train_questions)}): {train_questions}")
         print(f"Test questions ({len(test_questions)}): {test_questions}")
