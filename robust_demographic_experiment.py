@@ -5083,7 +5083,7 @@ def run_intervention_phase_cca(args):
         # (works for any intervention weights)
         test_results = evaluate_intervention_on_fold(
             model, tokenizer, df, test_questions,
-            demographic='all_demographics',  # Special demographic name
+            demographic='all', 
             category_names=category_names,
             intervention_weights=intervention_weights,
             device=args.device,
@@ -5234,11 +5234,7 @@ def main():
 
     if args.phase in ['intervene', 'both']:
         # Check if this is a CCA all-demographics intervention
-        # (single demographic called 'all_demographics' with CCA extraction)
-        if (args.demographics and
-            len(args.demographics) == 1 and
-            args.demographics[0] == 'all_demographics' and
-            args.analysis_method == 'cca'):
+        if (args.analysis_method == 'cca'):
 
             print("Detected CCA all-demographics mode")
             run_intervention_phase_cca(args)
