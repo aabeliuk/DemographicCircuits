@@ -180,6 +180,22 @@ def parse_arguments():
                        default='auto',
                        help='Intervention method: auto (detect from extraction), cca (use CCA weights), '
                             'probing (use ridge regression weights). Default: auto')
+    parser.add_argument('--intervention_mode', type=str,
+                       choices=['category', 'profile', 'targeted'],
+                       default='category',
+                       help='Intervention mode: category (same weights per demographic category), '
+                            'profile (user-specific weights based on individual profiles), '
+                            'targeted (shift toward specific demographic target). Default: category')
+    parser.add_argument('--target_demographics', type=str, nargs='+', default=None,
+                       help='Target demographics for targeted intervention mode. '
+                            'Format: attr=value (e.g., gender=Woman age=Young). '
+                            'Only used when --intervention_mode=targeted')
+    parser.add_argument('--n_canonical_dims', type=int, default=3,
+                       help='Number of canonical dimensions to use for profile-based interventions (default: 3)')
+    parser.add_argument('--profile_batching', action='store_true',
+                       help='Enable batching of users by profile similarity for performance optimization')
+    parser.add_argument('--n_profile_prototypes', type=int, default=10,
+                       help='Number of demographic prototypes for profile batching (default: 10)')
     parser.add_argument('--eval_sample_size', type=int, default=DEFAULT_EVAL_SAMPLE_SIZE,
                        help=f'Sample size per test question (default: {DEFAULT_EVAL_SAMPLE_SIZE})')
 
@@ -2958,9 +2974,23 @@ def evaluate_intervention_on_fold(
     prompt_style: str = "original",
     output_dir: Path = None,
     run_id: str = None,
-    top_k_heads: int = None
+    top_k_heads: int = None,
+    intervention_mode: str = "category",
+    demographic_encodings: Dict = None,
+    target_demographics: Dict = None,
+    profile_batching: bool = False,
+    n_profile_prototypes: int = 10
 ) -> Dict:
-    """Evaluate intervention on test fold"""
+    """
+    Evaluate intervention on test fold.
+
+    Args:
+        intervention_mode: 'category' (default), 'profile', or 'targeted'
+        demographic_encodings: Mapping for targeted mode
+        target_demographics: Target demo dict for targeted mode
+        profile_batching: Enable user batching for profile mode
+        n_profile_prototypes: Number of prototypes for batching
+    """
 
     # Determine config class and parameter name
     if probe_type == 'attention':
@@ -3098,13 +3128,156 @@ def evaluate_intervention_on_fold(
         sample_pbar.close()
         sample_pbar = tqdm(total=total_samples, desc=f"      Intervention phase", leave=False)
 
-        # PHASE 2: Collect intervention predictions (hooks once per category)
+        # PHASE 2: Collect intervention predictions
         user_idx = 0  # Track position in user_details list
-        for category_idx in sorted(user_data_by_category.keys()):
-            category_data = user_data_by_category[category_idx]
 
-            # Create class-specific intervention weights for this category
-            category_weights = select_class_specific_weights(intervention_weights, category_idx)
+        # Handle different intervention modes
+        if intervention_mode == 'profile':
+            # PROFILE MODE: User-specific weights based on individual demographic profiles
+            from src.intersectional_analysis import compute_user_specific_weights, batch_users_by_profile_similarity
+
+            # Get demographic columns from first user
+            first_user = test_users.iloc[0]
+            demographic_columns = [col for col in test_users.columns
+                                  if col.startswith(('gender_', 'age_', 'race_', 'education_', 'ideology_'))]
+
+            if profile_batching:
+                # Batch users by demographic similarity for performance
+                prototype_groups = batch_users_by_profile_similarity(
+                    test_users,
+                    demographic_columns,
+                    n_prototypes=n_profile_prototypes
+                )
+                print(f"        Batched {len(test_users)} users into {len(prototype_groups)} demographic prototypes")
+
+                # Process each prototype group
+                for prototype_id, user_indices in prototype_groups.items():
+                    # Compute weights for prototype (use first user as representative)
+                    representative_user = test_users.iloc[user_indices[0]]
+                    user_weights = compute_user_specific_weights(
+                        representative_user,
+                        intervention_weights,
+                        demographic_columns
+                    )
+
+                    # Create engine with user-specific weights
+                    engine = EngineClass(model, user_weights, device)
+                    config_kwargs = {
+                        'intervention_strength': intervention_strength,
+                        config_param: len(user_weights),
+                        'intervention_direction': 'maximize'
+                    }
+                    config = ConfigClass(**config_kwargs)
+
+                    # Register hooks for this prototype
+                    engine._clear_hooks()
+                    if isinstance(engine, CircuitInterventionEngine):
+                        top_k_items = list(user_weights.items())[:config.top_k_heads]
+                        for (layer, head), (ridge_coef, intercept, feature_std) in top_k_items:
+                            hook = engine._create_steering_hook(layer, head, ridge_coef, feature_std, config)
+                            engine.hooks.append(hook)
+                    else:
+                        top_k_items = list(user_weights.items())[:config.top_k_layers]
+                        for layer_idx, (ridge_coef, intercept, feature_std) in top_k_items:
+                            hook = engine._create_steering_hook(layer_idx, ridge_coef, feature_std, config)
+                            engine.hooks.append(hook)
+
+                    # Process all users in this prototype group
+                    for user_local_idx in user_indices:
+                        prompt = user_data_by_category[0]['prompts'][user_local_idx]
+                        intervention_pred = predict_from_logits_multitoken(
+                            model, tokenizer, prompt, answer_options, device,
+                            use_intervention=True,
+                            intervention_engine=engine,
+                            intervention_config=config,
+                            hooks_already_setup=True
+                        )
+                        intervention_predictions.append(intervention_pred)
+                        user_details[user_local_idx]['intervention_prediction'] = intervention_pred
+                        sample_pbar.update(1)
+
+            else:
+                # No batching: compute unique weights per user (slow but most accurate)
+                for user_local_idx, (idx, user_profile) in enumerate(test_users.iterrows()):
+                    # Compute user-specific weights
+                    user_weights = compute_user_specific_weights(
+                        user_profile,
+                        intervention_weights,
+                        demographic_columns
+                    )
+
+                    # Create engine and config
+                    engine = EngineClass(model, user_weights, device)
+                    config_kwargs = {
+                        'intervention_strength': intervention_strength,
+                        config_param: len(user_weights),
+                        'intervention_direction': 'maximize'
+                    }
+                    config = ConfigClass(**config_kwargs)
+
+                    # Get prompt for this user
+                    prompt = user_data_by_category[0]['prompts'][user_local_idx]
+
+                    # Run intervention (hooks registered fresh each time)
+                    intervention_pred = predict_from_logits_multitoken(
+                        model, tokenizer, prompt, answer_options, device,
+                        use_intervention=True,
+                        intervention_engine=engine,
+                        intervention_config=config
+                    )
+                    intervention_predictions.append(intervention_pred)
+                    user_details[user_local_idx]['intervention_prediction'] = intervention_pred
+                    sample_pbar.update(1)
+
+        elif intervention_mode == 'targeted':
+            # TARGETED MODE: Shift all users toward target demographic combination
+            from src.intersectional_analysis import compute_targeted_demographic_shift
+
+            # Get demographic columns
+            demographic_columns = [col for col in test_users.columns
+                                  if col.startswith(('gender_', 'age_', 'race_', 'education_', 'ideology_'))]
+
+            # Compute shift weights for each user
+            for user_local_idx, (idx, user_profile) in enumerate(test_users.iterrows()):
+                # Compute demographic shift weights for this user
+                shift_weights = compute_targeted_demographic_shift(
+                    user_profile,
+                    target_demographics,
+                    intervention_weights,
+                    demographic_columns,
+                    demographic_encodings
+                )
+
+                # Create engine and config
+                engine = EngineClass(model, shift_weights, device)
+                config_kwargs = {
+                    'intervention_strength': intervention_strength,
+                    config_param: len(shift_weights),
+                    'intervention_direction': 'maximize'
+                }
+                config = ConfigClass(**config_kwargs)
+
+                # Get prompt
+                prompt = user_data_by_category[0]['prompts'][user_local_idx]
+
+                # Run intervention
+                intervention_pred = predict_from_logits_multitoken(
+                    model, tokenizer, prompt, answer_options, device,
+                    use_intervention=True,
+                    intervention_engine=engine,
+                    intervention_config=config
+                )
+                intervention_predictions.append(intervention_pred)
+                user_details[user_local_idx]['intervention_prediction'] = intervention_pred
+                sample_pbar.update(1)
+
+        else:
+            # CATEGORY MODE: Original category-based intervention (default)
+            for category_idx in sorted(user_data_by_category.keys()):
+                category_data = user_data_by_category[category_idx]
+
+                # Create class-specific intervention weights for this category
+                category_weights = select_class_specific_weights(intervention_weights, category_idx)
 
             # Create intervention engine with class-specific weights
             engine = EngineClass(model, category_weights, device)
@@ -5082,25 +5255,74 @@ def run_intervention_phase_cca(args):
 
         # Extract intervention weights from CCA
         from src.cca_analysis import CCAAnalyzer
+        from src.intersectional_analysis import (
+            compute_user_specific_weights,
+            compute_targeted_demographic_shift,
+            get_demographic_encodings,
+            batch_users_by_profile_similarity
+        )
 
         print(f"\nExtracting top {args.top_k_heads} CCA intervention weights...")
         analyzer = CCAAnalyzer()
 
-        intervention_weights_raw = analyzer.get_intervention_weights(
-            cca_results,
-            canonical_dim=0,
-            top_k=args.top_k_heads
-        )
+        # Choose extraction method based on intervention mode
+        if args.intervention_mode in ['profile', 'targeted']:
+            # Use multi-dimensional extraction for profile-based modes
+            print(f"Using multi-dimensional extraction (n_canonical_dims={args.n_canonical_dims})")
+            intervention_weights_multidim = analyzer.get_intervention_weights_multidim(
+                cca_results,
+                n_canonical_dims=args.n_canonical_dims,
+                top_k=args.top_k_heads
+            )
+            print(f"Extracted {len(intervention_weights_multidim)} components with {args.n_canonical_dims} dimensions each")
 
-        # Convert to intervention format
-        intervention_weights = {}
-        for component_id, weights in intervention_weights_raw.items():
-            intervention_weights[component_id] = (weights, 0.0, 1.0)
+            # For profile/targeted modes, we don't convert to simple format yet
+            # Conversion happens per-user in evaluate function
+            intervention_weights = intervention_weights_multidim
+        else:
+            # Category mode: use single canonical dimension
+            intervention_weights_raw = analyzer.get_intervention_weights(
+                cca_results,
+                canonical_dim=0,
+                top_k=args.top_k_heads
+            )
 
-        print(f"Extracted {len(intervention_weights)} CCA intervention weights")
+            # Convert to intervention format
+            intervention_weights = {}
+            for component_id, weights in intervention_weights_raw.items():
+                intervention_weights[component_id] = (weights, 0.0, 1.0)
+
+            print(f"Extracted {len(intervention_weights)} CCA intervention weights")
 
         # Evaluate intervention on test questions
         print(f"\nEvaluating on {len(test_questions)} test questions...")
+        print(f"Intervention mode: {args.intervention_mode}")
+
+        # Prepare demographic encodings for profile/targeted modes
+        demographic_encodings = None
+        target_demographics_dict = None
+
+        if args.intervention_mode in ['profile', 'targeted']:
+            # Get demographic columns from the first question extraction
+            first_question = list(question_extractions.keys())[0]
+            demographic_features = question_extractions[first_question]['demographic_features']
+            demographic_columns = list(demographic_features[0].keys())
+
+            # Get demographic encodings
+            demographic_encodings = get_demographic_encodings(
+                df,
+                ['gender', 'age', 'race', 'education', 'ideology']
+            )
+
+            if args.intervention_mode == 'targeted' and args.target_demographics:
+                # Parse target demographics from command line
+                # Format: gender=Woman age=Young
+                target_demographics_dict = {}
+                for target_spec in args.target_demographics:
+                    if '=' in target_spec:
+                        attr, value = target_spec.split('=', 1)
+                        target_demographics_dict[attr] = value
+                print(f"Target demographics: {target_demographics_dict}")
 
         # Use existing evaluate_intervention_on_fold function
         # (works for any intervention weights)
@@ -5116,7 +5338,12 @@ def run_intervention_phase_cca(args):
             prompt_style=args.prompt_style,
             output_dir=results_dir,
             run_id=args.run_id,
-            top_k_heads=args.top_k_heads
+            top_k_heads=args.top_k_heads,
+            intervention_mode=args.intervention_mode,
+            demographic_encodings=demographic_encodings,
+            target_demographics=target_demographics_dict,
+            profile_batching=args.profile_batching,
+            n_profile_prototypes=args.n_profile_prototypes
         )
 
         # Store fold results

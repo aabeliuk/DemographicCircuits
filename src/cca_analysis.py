@@ -865,6 +865,49 @@ class CCAAnalyzer:
 
         return intervention_weights
 
+    def get_intervention_weights_multidim(
+        self,
+        results: CCAAnalysisResults,
+        n_canonical_dims: int = 3,
+        top_k: int = 20
+    ) -> Dict[Tuple[int, ...], Dict[str, np.ndarray]]:
+        """
+        Extract multi-dimensional intervention weights from CCA results.
+
+        This version extracts multiple canonical dimensions to enable richer
+        intersectional steering. Each dimension captures different demographic
+        variance patterns.
+
+        Args:
+            results: CCAAnalysisResults from analyze_attention_heads or analyze_mlp_layers
+            n_canonical_dims: Number of canonical dimensions to extract (default: 3)
+            top_k: Number of top components to return
+
+        Returns:
+            Dictionary mapping component_id -> dict containing:
+                'u_vectors': (feature_dim, n_canonical_dims) - Neural directions
+                'v_vectors': (demo_dim, n_canonical_dims) - Demographic patterns
+                'canonical_corrs': (n_canonical_dims,) - Correlation strengths
+        """
+        intervention_weights = {}
+
+        for result in results.get_top_components(top_k):
+            component_id = result.component_id
+
+            # Extract multiple canonical dimensions
+            # Shape: (feature_dim, n_canonical_dims)
+            u_vectors = result.left_weights[:, :n_canonical_dims]
+            v_vectors = result.right_weights[:, :n_canonical_dims]
+            canonical_corrs = result.canonical_correlations[:n_canonical_dims]
+
+            intervention_weights[component_id] = {
+                'u_vectors': u_vectors,
+                'v_vectors': v_vectors,
+                'canonical_corrs': canonical_corrs
+            }
+
+        return intervention_weights
+
     def print_top_components(
         self,
         results: CCAAnalysisResults,
@@ -900,6 +943,76 @@ class CCAAnalyzer:
 
         for i, corr in enumerate(result.canonical_correlations[:n_dims], 1):
             print(f"{i:<12} {corr:<15.4f}")
+
+    def cluster_intersectional_components(
+        self,
+        results: CCAAnalysisResults,
+        n_clusters: int = 5,
+        canonical_dim: int = 0
+    ) -> Dict[int, Dict]:
+        """
+        Cluster components by their demographic patterns (v-vectors).
+
+        Components in the same cluster encode similar intersectional patterns.
+        Example clusters:
+        - Cluster 1: Gender-primary (high loading on gender dimensions)
+        - Cluster 2: Race-primary (high loading on race dimensions)
+        - Cluster 3: Gender×Age intersection (high on both)
+        - Cluster 4: Race×Education intersection
+        - Cluster 5: Multi-way intersections
+
+        Args:
+            results: CCAAnalysisResults object
+            n_clusters: Number of clusters to create (default: 5)
+            canonical_dim: Which canonical dimension to analyze (default: 0)
+
+        Returns:
+            Dict mapping cluster_id -> {
+                'components': list of component IDs,
+                'avg_pattern': average v-vector for cluster,
+                'top_demographic_indices': indices of most important demographics,
+                'size': number of components in cluster
+            }
+        """
+        from sklearn.cluster import KMeans
+
+        # Extract v-vectors (demographic patterns) from all components
+        v_patterns = []
+        component_ids = []
+
+        for result in results.component_results:
+            # Use specified canonical dimension's demographic pattern
+            v_pattern = result.right_weights[:, canonical_dim]
+            v_patterns.append(v_pattern)
+            component_ids.append(result.component_id)
+
+        v_patterns = np.array(v_patterns)  # Shape: (n_components, demo_dim)
+
+        # Cluster based on demographic patterns
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        cluster_labels = kmeans.fit_predict(v_patterns)
+
+        # Organize by cluster
+        clusters = {i: [] for i in range(n_clusters)}
+        for comp_id, cluster_id in zip(component_ids, cluster_labels):
+            clusters[cluster_id].append(comp_id)
+
+        # Analyze each cluster's demographic pattern
+        cluster_interpretations = {}
+        for cluster_id in range(n_clusters):
+            cluster_mask = cluster_labels == cluster_id
+            avg_pattern = v_patterns[cluster_mask].mean(axis=0)
+
+            # Identify which demographics are most represented
+            top_indices = np.argsort(np.abs(avg_pattern))[-3:][::-1]  # Top 3, descending
+            cluster_interpretations[cluster_id] = {
+                'components': clusters[cluster_id],
+                'avg_pattern': avg_pattern,
+                'top_demographic_indices': top_indices.tolist(),
+                'size': len(clusters[cluster_id])
+            }
+
+        return cluster_interpretations
 
 
 def encode_demographic_features(
