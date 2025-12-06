@@ -2976,7 +2976,16 @@ def evaluate_intervention_on_fold(
 
     for question in tqdm(test_questions, desc="    Evaluating questions", leave=False):
         # Get test users
-        test_users = df[df[question].notna() & df[demographic_attr].notna()].copy()
+        if demographic_attr == 'all_demographics':
+            # For CCA all-demographics mode, check that users have all base demographics
+            base_demographics = ['gender', 'age', 'race', 'education', 'ideology']
+            demographic_mask = df[base_demographics[0]].notna()
+            for demo in base_demographics[1:]:
+                demographic_mask &= df[demo].notna()
+            test_users = df[df[question].notna() & demographic_mask].copy()
+        else:
+            # Standard single-demographic filtering
+            test_users = df[df[question].notna() & df[demographic_attr].notna()].copy()
 
         if len(test_users) == 0:
             continue
