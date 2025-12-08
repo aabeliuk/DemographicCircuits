@@ -5303,13 +5303,58 @@ def run_intervention_phase_cca(args):
         target_demographics_dict = None
 
         if args.intervention_mode in ['profile', 'targeted']:
-            # Get demographic columns from main DataFrame
-            # CCA saves demographic_features as np.ndarray, not dict, so we can't get column names from it
-            # The extraction file doesn't save user_df, so we get columns from the main df
-            demographic_columns = [col for col in df.columns
-                                  if col.startswith(('gender_', 'age_', 'race_', 'education_', 'ideology_'))]
+            # One-hot encode demographics for profile/targeted interventions
+            # This matches what extraction phase does
+            from src.cca_analysis import encode_demographics_mixed
 
-            print(f"        Found {len(demographic_columns)} demographic columns")
+            # Define demographic encoding strategy (same as extraction phase)
+            categorical_demographics = ['gender', 'race', 'education', 'urban_rural']
+            ordinal_demographics = ['age', 'ideology']
+
+            # Ordinal mappings for ordered demographics (same as extraction)
+            ordinal_mappings = {
+                'age': {'Young Adult': 0, 'Adult': 1, 'Senior': 2},
+                'ideology': {'Left': 0, 'Center': 1, 'Right': 2}
+            }
+
+            # Pre-compute fixed demographic categories (same as extraction)
+            fixed_categories = {}
+            for col in categorical_demographics:
+                if col in df.columns:
+                    unique_values = df[col].dropna().unique().tolist()
+                    fixed_categories[col] = sorted(unique_values)
+
+            # One-hot encode demographics
+            demographic_features_encoded = encode_demographics_mixed(
+                df,
+                categorical_columns=categorical_demographics,
+                ordinal_columns=ordinal_demographics,
+                ordinal_mappings=ordinal_mappings,
+                fixed_categories=fixed_categories
+            )
+
+            # Create column names for the encoded features
+            demographic_columns = []
+            for col in categorical_demographics:
+                if col in fixed_categories:
+                    for cat_value in fixed_categories[col]:
+                        demographic_columns.append(f"{col}_{cat_value}")
+
+            # Add ordinal columns
+            for col in ordinal_demographics:
+                demographic_columns.append(col)
+
+            # Add encoded features to DataFrame
+            encoded_df = pd.DataFrame(
+                demographic_features_encoded,
+                columns=demographic_columns,
+                index=df.index
+            )
+
+            # Merge encoded demographics into main DataFrame
+            df = pd.concat([df, encoded_df], axis=1)
+
+            print(f"        One-hot encoded demographics: {len(demographic_columns)} columns")
 
             # Get demographic encodings
             demographic_encodings = get_demographic_encodings(
