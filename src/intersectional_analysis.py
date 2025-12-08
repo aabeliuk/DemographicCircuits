@@ -37,6 +37,9 @@ def compute_user_specific_weights(
     # Extract user's demographic vector
     user_demo_vector = user_profile[demographic_columns].values  # Shape: (demo_dim,)
 
+    # Ensure numeric dtype (convert any object dtypes to float)
+    user_demo_vector = user_demo_vector.astype(float)
+
     user_weights = {}
 
     for component_id, weight_data in intervention_weights.items():
@@ -94,6 +97,10 @@ def compute_targeted_demographic_shift(
         demographic_columns
     )
     source_vector = source_profile[demographic_columns].values
+
+    # Ensure numeric dtypes (convert any object dtypes to float)
+    source_vector = source_vector.astype(float)
+    target_vector = target_vector.astype(float)
 
     # Compute demographic shift direction in demographic space
     demo_shift = target_vector - source_vector
