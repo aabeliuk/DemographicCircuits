@@ -308,6 +308,16 @@ def build_demographic_description(user_profile: pd.Series, exclude_attribute: st
     education_phrase = None
     location_phrase = None
 
+    # Helper function to safely extract value from Series
+    def get_val(profile, key):
+        if key not in profile.index:
+            return None
+        val = profile[key]
+        # Handle case where value might be a Series
+        if isinstance(val, pd.Series):
+            val = val.iloc[0] if len(val) > 0 else None
+        return val if pd.notna(val) else None
+
     # Mappings
     age_map = {'Young Adult': 'young', 'Adult': 'middle-aged', 'Senior': 'senior'}
     marital_map = {'Married': 'married', 'Previously married': 'previously married', 'Never married': 'never married'}
@@ -317,32 +327,41 @@ def build_demographic_description(user_profile: pd.Series, exclude_attribute: st
     edu_map = {'Low': 'with a high school education', 'Medium': 'with some college', 'High': 'with a college degree'}
 
     # Build demographics, excluding the target attribute if specified
-    if exclude_attribute != 'age' and 'age' in user_profile and not pd.isna(user_profile['age']):
-        adjectives.append(age_map.get(user_profile['age'], str(user_profile['age'])))
+    age_val = get_val(user_profile, 'age')
+    if exclude_attribute != 'age' and age_val is not None:
+        adjectives.append(age_map.get(age_val, str(age_val)))
 
-    if exclude_attribute != 'race' and 'race' in user_profile and not pd.isna(user_profile['race']):
-        adjectives.append(str(user_profile['race']))
+    race_val = get_val(user_profile, 'race')
+    if exclude_attribute != 'race' and race_val is not None:
+        adjectives.append(str(race_val))
 
-    if exclude_attribute != 'marital_status' and 'marital_status' in user_profile and not pd.isna(user_profile['marital_status']):
-        adjectives.append(marital_map.get(user_profile['marital_status'], ''))
+    marital_val = get_val(user_profile, 'marital_status')
+    if exclude_attribute != 'marital_status' and marital_val is not None:
+        adjectives.append(marital_map.get(marital_val, ''))
 
-    if exclude_attribute != 'religion' and 'religion' in user_profile and not pd.isna(user_profile['religion']):
-        adjectives.append(religion_map.get(user_profile['religion'], ''))
+    religion_val = get_val(user_profile, 'religion')
+    if exclude_attribute != 'religion' and religion_val is not None:
+        adjectives.append(religion_map.get(religion_val, ''))
 
-    if exclude_attribute != 'income' and 'income' in user_profile and not pd.isna(user_profile['income']):
-        adjectives.append(income_map.get(user_profile['income'], ''))
+    income_val = get_val(user_profile, 'income')
+    if exclude_attribute != 'income' and income_val is not None:
+        adjectives.append(income_map.get(income_val, ''))
 
-    if exclude_attribute != 'ideology' and 'ideology' in user_profile and not pd.isna(user_profile['ideology']):
-        adjectives.append(ideology_map.get(user_profile['ideology'], ''))
+    ideology_val = get_val(user_profile, 'ideology')
+    if exclude_attribute != 'ideology' and ideology_val is not None:
+        adjectives.append(ideology_map.get(ideology_val, ''))
 
-    if exclude_attribute != 'gender' and 'gender' in user_profile and not pd.isna(user_profile['gender']):
-        gender = str(user_profile['gender']).lower()
+    gender_val = get_val(user_profile, 'gender')
+    if exclude_attribute != 'gender' and gender_val is not None:
+        gender = str(gender_val).lower()
 
-    if exclude_attribute != 'education' and 'education' in user_profile and not pd.isna(user_profile['education']):
-        education_phrase = edu_map.get(user_profile['education'], '')
+    education_val = get_val(user_profile, 'education')
+    if exclude_attribute != 'education' and education_val is not None:
+        education_phrase = edu_map.get(education_val, '')
 
-    if exclude_attribute != 'urban_rural' and 'urban_rural' in user_profile and not pd.isna(user_profile['urban_rural']):
-        location_phrase = f"from a {str(user_profile['urban_rural']).lower()} area"
+    urban_rural_val = get_val(user_profile, 'urban_rural')
+    if exclude_attribute != 'urban_rural' and urban_rural_val is not None:
+        location_phrase = f"from a {str(urban_rural_val).lower()} area"
 
     # Build final demographic string
     demographic_parts = []
