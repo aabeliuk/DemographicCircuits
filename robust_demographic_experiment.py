@@ -1627,6 +1627,16 @@ def run_cca_extraction_phase(args, model, tokenizer, df, output_dir, model_confi
             fixed_categories[col] = sorted(unique_values)  # Sort for consistency
             print(f"  {col}: {len(unique_values)} categories - {unique_values}")
 
+    # Create column names list (matches what encode_demographics_mixed produces)
+    demographic_columns = []
+    for col in categorical_demographics:
+        if col in fixed_categories:
+            for cat_value in fixed_categories[col]:
+                demographic_columns.append(f"{col}_{cat_value}")
+    for col in ordinal_demographics:
+        demographic_columns.append(col)
+    print(f"Total demographic features: {len(demographic_columns)}")
+
     # Extract activations for all questions
     question_extractions = {}
 
@@ -1835,6 +1845,8 @@ def run_cca_extraction_phase(args, model, tokenizer, df, output_dir, model_confi
         extraction_data = {
             'analysis_method': 'cca',
             'demographics': categorical_demographics + ordinal_demographics,
+            'demographic_columns': demographic_columns,  # Column names used for CCA
+            'fixed_categories': fixed_categories,  # Category values for each demographic
             'probe_type': args.probe_type,
             'model': args.model,
             'run_id': args.run_id,
@@ -5321,61 +5333,87 @@ def run_intervention_phase_cca(args):
         target_demographics_dict = None
 
         if args.intervention_mode in ['profile', 'targeted']:
-            # One-hot encode demographics for profile/targeted interventions
-            # This matches what extraction phase does
-            from src.cca_analysis import encode_demographics_mixed
+            # Load demographic column names from extraction file to ensure exact match
+            # This is critical for dimension alignment in CCA weight computation
+            print(f"        Loading demographic encoding from extraction file...")
 
-            # Define demographic encoding strategy (same as extraction phase)
-            categorical_demographics = ['gender', 'race', 'education', 'urban_rural']
-            ordinal_demographics = ['age', 'ideology']
+            # Load first extraction file to get demographic metadata
+            first_extraction_file = extraction_files[0]
+            with open(first_extraction_file, 'rb') as f:
+                extraction_metadata = pickle.load(f)
 
-            # Ordinal mappings for ordered demographics (same as extraction)
-            ordinal_mappings = {
-                'age': {'Young Adult': 0, 'Adult': 1, 'Senior': 2},
-                'ideology': {'Left': 0, 'Center': 1, 'Right': 2}
-            }
+            # Get the demographic columns that were used during CCA extraction
+            if 'demographic_columns' in extraction_metadata:
+                demographic_columns = extraction_metadata['demographic_columns']
+                print(f"        Loaded {len(demographic_columns)} demographic columns from extraction")
+                print(f"        Columns: {demographic_columns}")
+            else:
+                # Fallback: use default columns (for compatibility with old extraction files)
+                print(f"        WARNING: 'demographic_columns' not found in extraction file")
+                print(f"        Using fallback demographic column detection")
+                demographic_columns = [col for col in df.columns
+                                      if col.startswith(('gender_', 'age', 'race_', 'education_', 'ideology'))]
+                print(f"        Detected {len(demographic_columns)} demographic columns")
 
-            # Pre-compute fixed demographic categories (same as extraction)
-            fixed_categories = {}
-            for col in categorical_demographics:
-                if col in df.columns:
-                    unique_values = df[col].dropna().unique().tolist()
-                    fixed_categories[col] = sorted(unique_values)
+            # Check if we need to encode demographics (if columns are missing from df)
+            missing_cols = [col for col in demographic_columns if col not in df.columns]
 
-            # One-hot encode demographics
-            demographic_features_encoded = encode_demographics_mixed(
-                df,
-                categorical_columns=categorical_demographics,
-                ordinal_columns=ordinal_demographics,
-                ordinal_mappings=ordinal_mappings,
-                fixed_categories=fixed_categories
-            )
+            if missing_cols:
+                print(f"        Need to encode {len(missing_cols)} missing demographic columns")
 
-            # Create column names for the encoded features
-            demographic_columns = []
-            for col in categorical_demographics:
-                if col in fixed_categories:
-                    for cat_value in fixed_categories[col]:
-                        demographic_columns.append(f"{col}_{cat_value}")
+                # Load encoding metadata from extraction file
+                from src.cca_analysis import encode_demographics_mixed
 
-            # Add ordinal columns
-            for col in ordinal_demographics:
-                demographic_columns.append(col)
+                if 'fixed_categories' in extraction_metadata:
+                    fixed_categories = extraction_metadata['fixed_categories']
+                    print(f"        Using fixed_categories from extraction file")
+                else:
+                    # Fallback: regenerate fixed categories
+                    categorical_demographics = ['gender', 'race', 'education', 'urban_rural']
+                    fixed_categories = {}
+                    for col in categorical_demographics:
+                        if col in df.columns:
+                            unique_values = df[col].dropna().unique().tolist()
+                            fixed_categories[col] = sorted(unique_values)
+                    print(f"        Generated fixed_categories from current data")
 
-            # Add encoded features to DataFrame
-            encoded_df = pd.DataFrame(
-                demographic_features_encoded,
-                columns=demographic_columns,
-                index=df.index
-            )
+                # Get demographics lists from metadata or use defaults
+                categorical_demographics = [d for d in extraction_metadata.get('demographics', [])
+                                          if d in ['gender', 'race', 'education', 'urban_rural']]
+                ordinal_demographics = [d for d in extraction_metadata.get('demographics', [])
+                                       if d in ['age', 'ideology']]
 
-            # Merge encoded demographics into main DataFrame
-            df = pd.concat([df, encoded_df], axis=1)
+                # Ordinal mappings (same as extraction)
+                ordinal_mappings = {
+                    'age': {'Young Adult': 0, 'Adult': 1, 'Senior': 2},
+                    'ideology': {'Left': 0, 'Center': 1, 'Right': 2}
+                }
 
-            # Reset index to avoid type mismatch issues during mask operations
-            df = df.reset_index(drop=True)
+                # One-hot encode demographics
+                demographic_features_encoded = encode_demographics_mixed(
+                    df,
+                    categorical_columns=categorical_demographics,
+                    ordinal_columns=ordinal_demographics,
+                    ordinal_mappings=ordinal_mappings,
+                    fixed_categories=fixed_categories
+                )
 
-            print(f"        One-hot encoded demographics: {len(demographic_columns)} columns")
+                # Add encoded features to DataFrame
+                encoded_df = pd.DataFrame(
+                    demographic_features_encoded,
+                    columns=demographic_columns,
+                    index=df.index
+                )
+
+                # Merge encoded demographics into main DataFrame
+                df = pd.concat([df, encoded_df], axis=1)
+
+                # Reset index to avoid type mismatch issues during mask operations
+                df = df.reset_index(drop=True)
+
+                print(f"        Encoded demographics: {len(demographic_columns)} columns")
+            else:
+                print(f"        All demographic columns already present in DataFrame")
 
             # Get demographic encodings
             demographic_encodings = get_demographic_encodings(
