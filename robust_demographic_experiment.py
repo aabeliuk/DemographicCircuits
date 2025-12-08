@@ -3009,9 +3009,8 @@ def evaluate_intervention_on_fold(
         if demographic_attr == 'all_demographics':
             # For CCA all-demographics mode, check that users have all base demographics
             base_demographics = ['gender', 'age', 'race', 'education', 'ideology']
-            demographic_mask = df[base_demographics[0]].notna()
-            for demo in base_demographics[1:]:
-                demographic_mask = demographic_mask & df[demo].notna()
+            # Build mask all at once to avoid index alignment issues
+            demographic_mask = df[base_demographics].notna().all(axis=1)
             test_users = df[df[question].notna() & demographic_mask].copy()
         else:
             # Standard single-demographic filtering
