@@ -5411,6 +5411,10 @@ def run_intervention_phase_cca(args):
                     index=df.index
                 )
 
+                # Drop original ordinal columns that will be replaced by encoded numeric versions
+                ordinal_columns = ['age', 'ideology']
+                df = df.drop(columns=[col for col in ordinal_columns if col in df.columns], errors='ignore')
+
                 # Merge encoded demographics into main DataFrame
                 df = pd.concat([df, encoded_df], axis=1)
 
