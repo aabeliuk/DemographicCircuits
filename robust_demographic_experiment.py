@@ -251,10 +251,10 @@ def parse_arguments():
     if args.demographics is None:
         args.demographics = ALL_DEMOGRAPHICS
 
-    # Validate demographics
-    invalid_demos = set(args.demographics) - set(ALL_DEMOGRAPHICS)
+    # Validate demographics (allow 'all_demographics' as special value)
+    invalid_demos = set(args.demographics) - set(ALL_DEMOGRAPHICS) - {'all_demographics'}
     if invalid_demos:
-        parser.error(f"Invalid demographics: {invalid_demos}. Valid options: {ALL_DEMOGRAPHICS}")
+        parser.error(f"Invalid demographics: {invalid_demos}. Valid options: {ALL_DEMOGRAPHICS} or 'all_demographics'")
 
     # Validate intersectional demographics
     if args.intersect_demographics is not None:
@@ -3011,7 +3011,7 @@ def evaluate_intervention_on_fold(
             base_demographics = ['gender', 'age', 'race', 'education', 'ideology']
             demographic_mask = df[base_demographics[0]].notna()
             for demo in base_demographics[1:]:
-                demographic_mask &= df[demo].notna()
+                demographic_mask = demographic_mask & df[demo].notna()
             test_users = df[df[question].notna() & demographic_mask].copy()
         else:
             # Standard single-demographic filtering
