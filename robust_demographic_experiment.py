@@ -3010,7 +3010,8 @@ def evaluate_intervention_on_fold(
     demographic_encodings: Dict = None,
     target_demographics: Dict = None,
     profile_batching: bool = False,
-    n_profile_prototypes: int = 10
+    n_profile_prototypes: int = 10,
+    demographic_columns: Optional[List[str]] = None
 ) -> Dict:
     """
     Evaluate intervention on test fold.
@@ -3166,10 +3167,12 @@ def evaluate_intervention_on_fold(
             # PROFILE MODE: User-specific weights based on individual demographic profiles
             from src.intersectional_analysis import compute_user_specific_weights, batch_users_by_profile_similarity
 
-            # Get demographic columns from first user
-            first_user = test_users.iloc[0]
-            demographic_columns = [col for col in test_users.columns
-                                  if col.startswith(('gender_', 'age_', 'race_', 'education_', 'ideology_'))]
+            # Use demographic_columns from extraction file if provided
+            if demographic_columns is None:
+                # Fallback: detect from DataFrame (but include ordinal columns without prefixes!)
+                demographic_columns = [col for col in test_users.columns
+                                      if col.startswith(('gender_', 'race_', 'education_', 'urban_rural_'))
+                                      or col in ['age', 'ideology']]
 
             if profile_batching:
                 # Batch users by demographic similarity for performance
@@ -3263,9 +3266,12 @@ def evaluate_intervention_on_fold(
             # TARGETED MODE: Shift all users toward target demographic combination
             from src.intersectional_analysis import compute_targeted_demographic_shift
 
-            # Get demographic columns
-            demographic_columns = [col for col in test_users.columns
-                                  if col.startswith(('gender_', 'age_', 'race_', 'education_', 'ideology_'))]
+            # Use demographic_columns from extraction file if provided
+            if demographic_columns is None:
+                # Fallback: detect from DataFrame (but include ordinal columns without prefixes!)
+                demographic_columns = [col for col in test_users.columns
+                                      if col.startswith(('gender_', 'race_', 'education_', 'urban_rural_'))
+                                      or col in ['age', 'ideology']]
 
             # Compute shift weights for each user
             for user_local_idx, (idx, user_profile) in enumerate(test_users.iterrows()):
@@ -5450,7 +5456,8 @@ def run_intervention_phase_cca(args):
             demographic_encodings=demographic_encodings,
             target_demographics=target_demographics_dict,
             profile_batching=args.profile_batching,
-            n_profile_prototypes=args.n_profile_prototypes
+            n_profile_prototypes=args.n_profile_prototypes,
+            demographic_columns=demographic_columns
         )
 
         # Store fold results
