@@ -5354,6 +5354,9 @@ def run_intervention_phase_cca(args):
             # Merge encoded demographics into main DataFrame
             df = pd.concat([df, encoded_df], axis=1)
 
+            # Reset index to avoid type mismatch issues during mask operations
+            df = df.reset_index(drop=True)
+
             print(f"        One-hot encoded demographics: {len(demographic_columns)} columns")
 
             # Get demographic encodings
