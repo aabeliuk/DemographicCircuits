@@ -2375,24 +2375,6 @@ def train_weights_on_prefiltered_activations(
     return intervention_weights
 
 
-def predict_from_logits(logits: torch.Tensor, answer_options: List, tokenizer) -> str:
-    """
-    Get prediction from logits (simple first-token method).
-    DEPRECATED: Use predict_from_logits_multitoken for proper multi-token handling.
-    """
-    option_logits = []
-    for option in answer_options:
-        option_str = str(option)
-        tokens = tokenizer.encode(f" {option_str}", add_special_tokens=False)
-        if len(tokens) > 0:
-            option_logits.append(logits[0, tokens[0]].item())
-        else:
-            option_logits.append(float('-inf'))
-
-    predicted_idx = np.argmax(option_logits)
-    return answer_options[predicted_idx]
-
-
 def predict_from_logits_multitoken(
     model,
     tokenizer,

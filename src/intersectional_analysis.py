@@ -158,54 +158,6 @@ def create_demographic_vector(
     return target_vector
 
 
-def select_relevant_dimensions(
-    user_profile: pd.Series,
-    v_vectors: np.ndarray,
-    canonical_corrs: np.ndarray,
-    demographic_columns: List[str],
-    threshold: float = 0.3
-) -> np.ndarray:
-    """
-    Select which canonical dimensions are relevant for this user's demographics.
-
-    Different dimensions encode different demographic patterns:
-    - Dim 0 might encode gender-primary variance
-    - Dim 1 might encode race-primary variance
-    - Dim 2 might encode age-primary variance
-
-    For a user who is [Woman, White, Young], we weight dimensions based on
-    how much each dimension captures these specific attributes.
-
-    Args:
-        user_profile: User's demographic profile
-        v_vectors: Demographic patterns (demo_dim, n_canonical_dims)
-        canonical_corrs: Canonical correlations (n_canonical_dims,)
-        demographic_columns: List of demographic column names
-        threshold: Minimum weight to keep dimension (default: 0.3)
-
-    Returns:
-        Dimension weights (n_canonical_dims,) indicating relevance for this user
-    """
-    user_demo_vector = user_profile[demographic_columns].values
-
-    # Project user onto each canonical dimension
-    user_projections = v_vectors.T @ user_demo_vector  # (n_canonical_dims,)
-
-    # Weight by canonical correlations and user relevance
-    dimension_weights = canonical_corrs * np.abs(user_projections)
-
-    # Normalize
-    dimension_weights = dimension_weights / (dimension_weights.sum() + 1e-8)
-
-    # Zero out dimensions below threshold (sparsity)
-    dimension_weights[dimension_weights < threshold] = 0
-
-    # Re-normalize after thresholding
-    dimension_weights = dimension_weights / (dimension_weights.sum() + 1e-8)
-
-    return dimension_weights
-
-
 def batch_users_by_profile_similarity(
     users_df: pd.DataFrame,
     demographic_columns: List[str],
